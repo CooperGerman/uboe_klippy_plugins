@@ -9,7 +9,8 @@ cd uboe_klippy_plugins
 make
 ```
 This will create symlinks for each plugin in the klipper/klippy/extras folder in order for klippy to "seee" the plugins.
-** You will need to `FIRMWARE_RESTART` the printer for the changes to take effect. (or restart klipper service)**
+
+**You will need to `FIRMWARE_RESTART` the printer for the changes to take effect. (or restart klipper service)**
 
 # Plugins
 
