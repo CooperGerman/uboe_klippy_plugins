@@ -18,6 +18,7 @@
 SHELL=bash -e
 
 KLIPPY_DIR := /home/$(USER)/klipper/klippy
+CURDIR := $(shell pwd)
 
 default: all
 
@@ -29,8 +30,8 @@ symlinks:
 	$(info Setting up environment)
 	rm -rf $(KLIPPY_DIR)/extras/klipper_macros.py
 	rm -rf $(KLIPPY_DIR)/extras/toolhead_bed_sensor.py
-	ln -s ./klipper_macros.py $(KLIPPY_DIR)/extras/klipper_macros.py
-	ln -s ./klipper_macros.py $(KLIPPY_DIR)/extras/toolhead_bed_sensor.py
+	ln -s $(CURDIR)/klipper_macros.py $(KLIPPY_DIR)/extras/klipper_macros.py
+	ln -s $(CURDIR)/toolhead_bed_sensor.py $(KLIPPY_DIR)/extras/toolhead_bed_sensor.py
 
 
 REQUIRED_BINS :=
