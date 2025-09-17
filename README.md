@@ -1,5 +1,5 @@
 # Useful plugins used by uboe
-This repo contains useful plugins used by uboe. Some of them are confort plugins, some of them are useful for debugging and some of them are used to extend the functionality of klipper.
+This repo contains useful plugins used by uboe. Some of them are comfort plugins, some of them are useful for debugging and some of them are used to extend the functionality of klipper.
 # Installation
 1. Clone the repo where preferrably in your home directory.:
 ```bash
