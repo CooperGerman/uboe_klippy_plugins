@@ -4,7 +4,7 @@ This repo contains useful plugins used by uboe. Some of them are comfort plugins
 1. Clone the repo where preferrably in your home directory.:
 ```bash
 cd ~
-git clone https://github.com/print-hive/uboe_klippy_plugins.git
+git clone https://github.com/CooperGerman/uboe_klippy_plugins.git
 cd uboe_klippy_plugins
 make
 ```
