@@ -1,6 +1,6 @@
 # Support for servos
 #
-# Copyright (C) 2017-2020  Kevin O'Connor <kevin@koconnor.net>
+# Copyright (C) 2024-2026 Yannick Le Provost <yannick.leprovost@uboe.fr>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import configparser
