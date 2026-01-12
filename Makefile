@@ -28,10 +28,13 @@ setup: symlinks
 
 symlinks:
 	$(info Setting up environment)
-	rm -rf $(KLIPPY_DIR)/extras/klipper_macros.py
-	rm -rf $(KLIPPY_DIR)/extras/toolhead_bed_sensor.py
-	ln -s $(CURDIR)/klipper_macros.py $(KLIPPY_DIR)/extras/klipper_macros.py
-	ln -s $(CURDIR)/toolhead_bed_sensor.py $(KLIPPY_DIR)/extras/toolhead_bed_sensor.py
+	mkdir -p $(KLIPPY_DIR)/extras
+	@echo "Linking .py files from $(CURDIR) to $(KLIPPY_DIR)/extras"
+	@for f in $(CURDIR)/*.py ; do \
+		base=$$(basename $$f) ; \
+		rm -f $(KLIPPY_DIR)/extras/$$base ; \
+		ln -sf $(CURDIR)/$$base $(KLIPPY_DIR)/extras/$$base ; \
+	done
 
 
 REQUIRED_BINS :=
