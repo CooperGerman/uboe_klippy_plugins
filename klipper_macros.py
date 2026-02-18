@@ -49,6 +49,10 @@ class klipperMacros:
             "SET_HEATER_TEMPERATURE_COMPENSATE",
             self.cmd_SET_HEATER_TEMPERATURE_COMPENSATE,
             desc=self.cmd_SET_HEATER_TEMPERATURE_COMPENSATE_help)
+        self.gcode.register_command(
+            "SET_PRESSURE_ADVANCE",
+            self.cmd_SET_PRESSURE_ADVANCE,
+            desc=self.cmd_SET_PRESSURE_ADVANCE_help)
 
     def _handle_ready(self):
         self.min_event_systime = self.printer.get_reactor().monotonic() + 2.
@@ -277,6 +281,17 @@ class klipperMacros:
                 self.bed_pheaters.set_temperature(self.bed_heater.heater, list(closest.keys())[0])
                 gcmd.respond_info("[COMPENSATION] : Compensating from %.2f to %.2f for heater %s" % (target, list(closest.keys())[0], heater))
                 return
+
+    # Override to add QUIET option to control console logging from https://github.com/moggieuk/Happy-Hare/blob/76eca598d7301d6e834ed39068e83270d318afff/extras/mmu_machine.py#L1276
+    cmd_SET_PRESSURE_ADVANCE_help = "Sets the pressure advance value. Usage: SET_PRESSURE_ADVANCE ADVANCE=<float> SMOOTH_TIME=<float> QUIET=<0|1>"
+    def cmd_SET_PRESSURE_ADVANCE(self, gcmd):
+        pressure_advance = gcmd.get_float('ADVANCE', self.pressure_advance, minval=0.)
+        smooth_time = gcmd.get_float('SMOOTH_TIME', self.pressure_advance_smooth_time, minval=0., maxval=.200)
+        self._set_pressure_advance(pressure_advance, smooth_time)
+        msg = "pressure_advance: %.6f\n" "pressure_advance_smooth_time: %.6f" % (pressure_advance, smooth_time)
+        self.printer.set_rollover_info(self.name, "%s: %s" % (self.name, msg))
+        if not gcmd.get_int('QUIET', 0, minval=0, maxval=1):
+            gcmd.respond_info(msg, log=False)
 
 def load_config(config):
     return klipperMacros(config)

@@ -408,16 +408,6 @@ Iterate over multiple probe commands to analyze heatsoaking effects.
 		msg.append("Woken up : %s" % (self.woken_up,))
 		self.ratos.console_echo(title, 'info', ('_N_'.join(msg)))
 
-	# Override to add QUIET option to control console logging from https://github.com/moggieuk/Happy-Hare/blob/76eca598d7301d6e834ed39068e83270d318afff/extras/mmu_machine.py#L1276
-	def cmd_SET_PRESSURE_ADVANCE(self, gcmd):
-		pressure_advance = gcmd.get_float('ADVANCE', self.pressure_advance, minval=0.)
-		smooth_time = gcmd.get_float('SMOOTH_TIME', self.pressure_advance_smooth_time, minval=0., maxval=.200)
-		self._set_pressure_advance(pressure_advance, smooth_time)
-		msg = "pressure_advance: %.6f\n" "pressure_advance_smooth_time: %.6f" % (pressure_advance, smooth_time)
-		self.printer.set_rollover_info(self.name, "%s: %s" % (self.name, msg))
-		if not gcmd.get_int('QUIET', 0, minval=0, maxval=1):
-			gcmd.respond_info(msg, log=False)
-
 	def get_status(self, evnttime):
 		return {
 			"safeguard_state": self.safeguard_state,
