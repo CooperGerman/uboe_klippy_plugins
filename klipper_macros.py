@@ -49,6 +49,8 @@ class klipperMacros:
             "SET_HEATER_TEMPERATURE_COMPENSATE",
             self.cmd_SET_HEATER_TEMPERATURE_COMPENSATE,
             desc=self.cmd_SET_HEATER_TEMPERATURE_COMPENSATE_help)
+
+        self.prev_SET_PRESSURE_ADVANCE = self.gcode.register_command("SET_PRESSURE_ADVANCE", None)
         self.gcode.register_command(
             "SET_PRESSURE_ADVANCE",
             self.cmd_SET_PRESSURE_ADVANCE,
@@ -285,12 +287,13 @@ class klipperMacros:
     # Override to add QUIET option to control console logging from https://github.com/moggieuk/Happy-Hare/blob/76eca598d7301d6e834ed39068e83270d318afff/extras/mmu_machine.py#L1276
     cmd_SET_PRESSURE_ADVANCE_help = "Sets the pressure advance value. Usage: SET_PRESSURE_ADVANCE ADVANCE=<float> SMOOTH_TIME=<float> QUIET=<0|1>"
     def cmd_SET_PRESSURE_ADVANCE(self, gcmd):
-        pressure_advance = gcmd.get_float('ADVANCE', self.pressure_advance, minval=0.)
-        smooth_time = gcmd.get_float('SMOOTH_TIME', self.pressure_advance_smooth_time, minval=0., maxval=.200)
-        self._set_pressure_advance(pressure_advance, smooth_time)
+        ext_step = self.toolhead.get_extruder().extruder_stepper
+        pressure_advance = gcmd.get_float('ADVANCE', ext_step.pressure_advance, minval=0.)
+        smooth_time = gcmd.get_float('SMOOTH_TIME', ext_step.pressure_advance_smooth_time, minval=0., maxval=.200)
+        ext_step._set_pressure_advance(pressure_advance, smooth_time)
         msg = "pressure_advance: %.6f\n" "pressure_advance_smooth_time: %.6f" % (pressure_advance, smooth_time)
-        self.printer.set_rollover_info(self.name, "%s: %s" % (self.name, msg))
-        if not gcmd.get_int('QUIET', 0, minval=0, maxval=1):
+        self.printer.set_rollover_info(ext_step.name, "%s: %s" % (ext_step.name, msg))
+        if not gcmd.get_int('QUIET', 1, minval=0, maxval=1):
             gcmd.respond_info(msg, log=False)
 
 def load_config(config):
