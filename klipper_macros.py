@@ -50,11 +50,11 @@ class klipperMacros:
             self.cmd_SET_HEATER_TEMPERATURE_COMPENSATE,
             desc=self.cmd_SET_HEATER_TEMPERATURE_COMPENSATE_help)
 
-        self.prev_SET_PRESSURE_ADVANCE = self.gcode.register_command("SET_PRESSURE_ADVANCE", None)
-        self.gcode.register_command(
-            "SET_PRESSURE_ADVANCE",
-            self.cmd_SET_PRESSURE_ADVANCE,
-            desc=self.cmd_SET_PRESSURE_ADVANCE_help)
+        # self.prev_SET_PRESSURE_ADVANCE = self.gcode.register_command("SET_PRESSURE_ADVANCE", None)
+        # self.gcode.register_command(
+        #     "SET_PRESSURE_ADVANCE",
+        #     self.cmd_SET_PRESSURE_ADVANCE,
+        #     desc=self.cmd_SET_PRESSURE_ADVANCE_help)
 
     def _handle_ready(self):
         self.min_event_systime = self.printer.get_reactor().monotonic() + 2.
