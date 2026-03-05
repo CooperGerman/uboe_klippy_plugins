@@ -28,13 +28,7 @@ setup: symlinks
 
 symlinks:
 	$(info Setting up environment)
-	mkdir -p $(KLIPPY_DIR)/extras
-	@echo "Linking .py files from $(CURDIR) to $(KLIPPY_DIR)/extras"
-	@for f in $(CURDIR)/*.py ; do \
-		base=$$(basename $$f) ; \
-		rm -f $(KLIPPY_DIR)/extras/$$base ; \
-		ln -sf $(CURDIR)/$$base $(KLIPPY_DIR)/extras/$$base ; \
-	done
+	@bash $(CURDIR)/install.sh
 
 
 REQUIRED_BINS :=
