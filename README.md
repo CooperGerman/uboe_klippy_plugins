@@ -1,16 +1,42 @@
 # Useful plugins used by uboe
 This repo contains useful plugins used by uboe. Some of them are comfort plugins, some of them are useful for debugging and some of them are used to extend the functionality of klipper.
 # Installation
-1. Clone the repo where preferrably in your home directory.:
+
+## Option 1: Automatic Updates via Moonraker (Recommended)
+If you have Moonraker configured with an update manager, add the following to your `moonraker.conf`:
+
+```ini
+[update_manager uboe_klippy_plugins]
+type: git_repo
+path: ~/uboe_klippy_plugins
+origin: https://github.com/CooperGerman/uboe_klippy_plugins.git
+install_script: install.sh
+managed_services: klipper
+is_system_service: False
+primary_branch: main
+```
+
+Moonraker will then automatically install and manage updates for these plugins.
+
+## Option 2: Manual Installation
+Clone the repo in your home directory and run the install script:
+
 ```bash
 cd ~
 git clone https://github.com/CooperGerman/uboe_klippy_plugins.git
 cd uboe_klippy_plugins
-make
+./install.sh
 ```
-This will create symlinks for each plugin in the klipper/klippy/extras folder in order for klippy to "seee" the plugins.
 
-**You will need to `FIRMWARE_RESTART` the printer for the changes to take effect. (or restart klipper service)**
+Or use the Makefile:
+```bash
+cd ~/uboe_klippy_plugins
+make setup
+```
+
+Both methods will create symlinks for each plugin in the `klipper/klippy/extras` folder so Klipper can load the plugins.
+
+**After installation, you will need to `FIRMWARE_RESTART` the printer or restart the klipper service for the changes to take effect.**
 
 # Plugins
 
