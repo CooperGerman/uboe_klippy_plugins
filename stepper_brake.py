@@ -80,7 +80,6 @@ class StepperBrake:
         """Monkey-patch the stepper module to integrate our helper registration."""
         try:
             import sys
-            # Try to get stepper from sys.modules if already loaded
             if 'stepper' in sys.modules:
                 stepper = sys.modules['stepper']
             else:
@@ -240,6 +239,14 @@ class StepperBrake:
             self.cmd_STEPPER_BRAKE_STATUS,
             desc="Report stepper brake status"
         )
+
+        # Register SET_PIN mux handler so macros can use SET_PIN PIN=<brake_name>
+        brake_name = self.name.split()[-1]
+        gcode.register_mux_command(
+            "SET_PIN", "PIN", brake_name,
+            self.cmd_SET_PIN_brake,
+            desc="Set stepper brake via SET_PIN"
+        )
         logger.info("G-code commands registered successfully")
 
     def cmd_STEPPER_BRAKE_ENGAGE(self, gcmd):
@@ -293,6 +300,21 @@ class StepperBrake:
         for config in self.brake_configs:
             state = "ENGAGED" if config['stepper'].get_brake_state() else "RELEASED"
             gcmd.respond_info(f"  {config['name']}: {state}")
+
+
+    def _set_pin_from_set_pin_cmd(self, print_time, engage):
+        self._pin_obj.set_digital(print_time, 1 if engage else 0)
+        for cfg in self.brake_configs:
+            cfg['stepper']._brake_engaged = engage
+
+    def cmd_SET_PIN_brake(self, gcmd):
+        """Handle SET_PIN PIN=<brake_name> VALUE=0/1 from macros."""
+        value = gcmd.get_float("VALUE", minval=0.0, maxval=1.0)
+        engage = value >= 0.5
+        toolhead = self.printer.lookup_object("toolhead")
+        toolhead.register_lookahead_callback(
+            lambda print_time: self._set_pin_from_set_pin_cmd(print_time, engage)
+        )
 
 
 def load_config_prefix(config):
