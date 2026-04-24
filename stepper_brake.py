@@ -58,8 +58,12 @@ class StepperBrake:
         """Create a GPIO output pin."""
         try:
             ppins = self.printer.lookup_object("pins")
-            # Setup as digital output
             self._pin_obj = ppins.setup_pin("digital_out", self.pin)
+            # Disable max_duration (default 2s causes "exceed max_duration" shutdown
+            # when pin changes are scheduled far ahead via register_lookahead_callback)
+            self._pin_obj.setup_max_duration(0)
+            # Start and shutdown value both 0 (brake engaged = pin low by default)
+            self._pin_obj.setup_start_value(0, 0)
             logger.debug(f"Created GPIO output pin for {self.pin}")
         except Exception as e:
             raise self.printer.config_error(
@@ -146,8 +150,10 @@ class StepperBrake:
         def engage_brake():
             if not stepper._brake_engaged:
                 try:
-                    # Use output_pin's set_level() which handles timing internally
-                    self._pin_obj.set_level(1)
+                    toolhead = self.printer.lookup_object('toolhead')
+                    toolhead.register_lookahead_callback(
+                        lambda print_time: self._pin_obj.set_digital(print_time, 1)
+                    )
                     stepper._brake_engaged = True
                     logger.debug(f"Brake engaged for {stepper.get_name()}")
                 except Exception as e:
@@ -157,8 +163,10 @@ class StepperBrake:
         def release_brake():
             if stepper._brake_engaged:
                 try:
-                    # Use output_pin's set_level() which handles timing internally
-                    self._pin_obj.set_level(0)
+                    toolhead = self.printer.lookup_object('toolhead')
+                    toolhead.register_lookahead_callback(
+                        lambda print_time: self._pin_obj.set_digital(print_time, 0)
+                    )
                     stepper._brake_engaged = False
                     logger.debug(f"Brake released for {stepper.get_name()}")
                 except Exception as e:
