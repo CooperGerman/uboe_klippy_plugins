@@ -84,25 +84,27 @@ class StepperBrake:
             if 'stepper' in sys.modules:
                 stepper = sys.modules['stepper']
             else:
-                # Try importing as klippy submodule
                 from klippy import stepper
+
+            # If already patched by us, just update the global and skip re-wrapping
+            if getattr(stepper.PrinterStepper, '_stepper_brake_patched', False):
+                logger.info("stepper.PrinterStepper already patched, skipping re-wrap")
+                self._patched = True
+                return
 
             original_PrinterStepper = stepper.PrinterStepper
 
             def patched_PrinterStepper(config, units_in_radians=False):
-                # Call original function to create stepper
                 mcu_stepper = original_PrinterStepper(config, units_in_radians)
-
-                # Call our register_stepper hook
                 stepper_name = mcu_stepper.get_name()
                 logger.info(f"Patched PrinterStepper called for {stepper_name}, calling hook")
                 if _stepper_brake_instance is not None:
                     _stepper_brake_instance.register_stepper(config, mcu_stepper)
                 else:
                     logger.warning("_stepper_brake_instance is None, cannot register stepper")
-
                 return mcu_stepper
 
+            patched_PrinterStepper._stepper_brake_patched = True
             stepper.PrinterStepper = patched_PrinterStepper
             logger.info("Successfully patched stepper.PrinterStepper")
             self._patched = True
