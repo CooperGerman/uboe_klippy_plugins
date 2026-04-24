@@ -26,7 +26,6 @@ class StepperBrake:
         global _stepper_brake_instance
         logger.info("StepperBrake.__init__ called")
         self.printer = config.get_printer()
-        self.reactor = self.printer.get_reactor()
         self.name = config.get_name()
         self.pin = config.get("pin")
         self.stepper_names = config.getlist("stepper", [])
@@ -36,6 +35,7 @@ class StepperBrake:
         self.initialized = False
         self._toolhead_augmented = False
         self._stepper_enable_hooked = False
+        self._patched = False
         self._pin_obj = None  # Reference to output_pin object
         logger.info(f"StepperBrake initialized: name={self.name}, pin={self.pin}, steppers={self.stepper_names}")
 
@@ -45,8 +45,10 @@ class StepperBrake:
         # Create output_pin object programmatically
         self._create_output_pin()
 
-        # Store global reference for monkey-patching
-        global _stepper_brake_instance
+        # Store global reference for monkey-patching.
+        # patched_PrinterStepper is installed on the stepper module permanently.
+        # On MCU reset a new StepperBrake instance is created; updating the
+        # global here ensures the old closure routes calls to the new instance.
         _stepper_brake_instance = self
 
         # Patch stepper module immediately (might fail if not loaded yet, that's OK)
@@ -74,7 +76,7 @@ class StepperBrake:
     def _on_printer_ready(self):
         """Called when printer is ready: patch stepper module, wrap toolhead.move,
         and hook stepper_enable for auto engage/release."""
-        if not getattr(self, '_patched', False):
+        if not self._patched:
             self._patch_stepper_module()
         if not self._toolhead_augmented:
             self._augment_toolhead_for_brake_control()
@@ -140,7 +142,6 @@ class StepperBrake:
         """Augment a stepper object with brake pin functionality."""
 
         # Add brake-related attributes to the stepper
-        stepper._brake_pin_obj = self._pin_obj
         stepper._brake_engaged = True  # Default to engaged at startup
 
         # Add method to engage brake
@@ -204,11 +205,15 @@ class StepperBrake:
         self._toolhead_augmented = True
         logger.info("Wrapped toolhead.move for auto brake release")
 
+    def _set_all_brakes(self, print_time, engage):
+        """Set the shared brake pin and sync all per-stepper state flags."""
+        self._pin_obj.set_digital(print_time, 1 if engage else 0)
+        for cfg in self.brake_configs:
+            cfg['stepper']._brake_engaged = engage
+
     def _do_release_all(self, print_time):
         """Release all brakes at print_time (called as a lookahead callback)."""
-        self._pin_obj.set_digital(print_time, 0)
-        for cfg in self.brake_configs:
-            cfg['stepper']._brake_engaged = False
+        self._set_all_brakes(print_time, False)
         logger.debug("Auto-released all brakes before move")
 
     def _hook_stepper_enable(self):
@@ -241,14 +246,12 @@ class StepperBrake:
                 not cfg['stepper']._brake_engaged for cfg in self.brake_configs
             )
             if any_released:
-                self._pin_obj.set_digital(print_time, 1)
-                for cfg in self.brake_configs:
-                    cfg['stepper']._brake_engaged = True
+                self._set_all_brakes(print_time, True)
                 logger.debug("Auto-engaged all brakes on motor disable")
 
     def _register_gcode_commands(self):
         """Register G-code commands for manual brake control."""
-        logger.info("_register_gcode_commands called")
+        logger.debug("_register_gcode_commands called")
         gcode = self.printer.lookup_object("gcode")
 
         # Register STEPPER_BRAKE_ENGAGE command
@@ -279,45 +282,33 @@ class StepperBrake:
             self.cmd_SET_PIN_brake,
             desc="Set stepper brake via SET_PIN"
         )
-        logger.info("G-code commands registered successfully")
+        logger.debug("G-code commands registered successfully")
+
+    def _cmd_brake_action(self, gcmd, engage):
+        """Shared handler for STEPPER_BRAKE_ENGAGE / RELEASE commands."""
+        if not self.initialized:
+            raise gcmd.error("Stepper brakes not yet initialized. Wait a moment and retry.")
+        stepper_name = gcmd.get("STEPPER", None)
+        if stepper_name is None:
+            raise gcmd.error("STEPPER parameter required")
+        for cfg in self.brake_configs:
+            if cfg['name'] == stepper_name or cfg['name'] == f"stepper_{stepper_name}":
+                if engage:
+                    cfg['stepper'].engage_brake()
+                    gcmd.respond_info(f"Engaged brake for {cfg['name']}")
+                else:
+                    cfg['stepper'].release_brake()
+                    gcmd.respond_info(f"Released brake for {cfg['name']}")
+                return
+        raise gcmd.error(f"Stepper '{stepper_name}' not found in brake configuration")
 
     def cmd_STEPPER_BRAKE_ENGAGE(self, gcmd):
         """G-code command to engage brake on a specific stepper."""
-        if not self.initialized:
-            raise gcmd.error("Stepper brakes not yet initialized. Wait a moment and retry.")
-
-        stepper_name = gcmd.get("STEPPER", None)
-
-        if stepper_name is None:
-            raise gcmd.error("STEPPER parameter required")
-
-        # Find the stepper in our brake config
-        for config in self.brake_configs:
-            if config['name'] == stepper_name or config['name'] == f"stepper_{stepper_name}":
-                config['stepper'].engage_brake()
-                gcmd.respond_info(f"Engaged brake for {config['name']}")
-                return
-
-        raise gcmd.error(f"Stepper '{stepper_name}' not found in brake configuration")
+        self._cmd_brake_action(gcmd, engage=True)
 
     def cmd_STEPPER_BRAKE_RELEASE(self, gcmd):
         """G-code command to release brake on a specific stepper."""
-        if not self.initialized:
-            raise gcmd.error("Stepper brakes not yet initialized. Wait a moment and retry.")
-
-        stepper_name = gcmd.get("STEPPER", None)
-
-        if stepper_name is None:
-            raise gcmd.error("STEPPER parameter required")
-
-        # Find the stepper in our brake config
-        for config in self.brake_configs:
-            if config['name'] == stepper_name or config['name'] == f"stepper_{stepper_name}":
-                config['stepper'].release_brake()
-                gcmd.respond_info(f"Released brake for {config['name']}")
-                return
-
-        raise gcmd.error(f"Stepper '{stepper_name}' not found in brake configuration")
+        self._cmd_brake_action(gcmd, engage=False)
 
     def cmd_STEPPER_BRAKE_STATUS(self, gcmd):
         """G-code command to report brake status for all configured steppers."""
@@ -334,18 +325,13 @@ class StepperBrake:
             gcmd.respond_info(f"  {config['name']}: {state}")
 
 
-    def _set_pin_from_set_pin_cmd(self, print_time, engage):
-        self._pin_obj.set_digital(print_time, 1 if engage else 0)
-        for cfg in self.brake_configs:
-            cfg['stepper']._brake_engaged = engage
-
     def cmd_SET_PIN_brake(self, gcmd):
         """Handle SET_PIN PIN=<brake_name> VALUE=0/1 from macros."""
         value = gcmd.get_float("VALUE", minval=0.0, maxval=1.0)
         engage = value >= 0.5
         toolhead = self.printer.lookup_object("toolhead")
         toolhead.register_lookahead_callback(
-            lambda print_time: self._set_pin_from_set_pin_cmd(print_time, engage)
+            lambda print_time: self._set_all_brakes(print_time, engage)
         )
 
 
