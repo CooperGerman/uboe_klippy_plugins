@@ -20,7 +20,7 @@ class StepperBrake:
      pin: PB4
      stepper: stepper_x, stepper_z
      release_on_move: True
-     engage_on_dwell: True
+     engage_on_motor_off: True
     """
     def __init__(self, config):
         global _stepper_brake_instance
@@ -31,10 +31,11 @@ class StepperBrake:
         self.pin = config.get("pin")
         self.stepper_names = config.getlist("stepper", [])
         self.release_on_move = config.getboolean("release_on_move", True)
-        self.engage_on_dwell = config.getboolean("engage_on_dwell", True)
+        self.engage_on_motor_off = config.getboolean("engage_on_motor_off", True)
         self.brake_configs = []
         self.initialized = False
         self._toolhead_augmented = False
+        self._stepper_enable_hooked = False
         self._pin_obj = None  # Reference to output_pin object
         logger.info(f"StepperBrake initialized: name={self.name}, pin={self.pin}, steppers={self.stepper_names}")
 
@@ -71,10 +72,14 @@ class StepperBrake:
             )
 
     def _on_printer_ready(self):
-        """Called when printer is ready. Patch stepper module if not already done."""
-        # Try patching again as a fallback in case it wasn't loaded during __init__
+        """Called when printer is ready: patch stepper module, wrap toolhead.move,
+        and hook stepper_enable for auto engage/release."""
         if not getattr(self, '_patched', False):
             self._patch_stepper_module()
+        if not self._toolhead_augmented:
+            self._augment_toolhead_for_brake_control()
+        if not self._stepper_enable_hooked:
+            self._hook_stepper_enable()
 
     def _patch_stepper_module(self):
         """Monkey-patch the stepper module to integrate our helper registration."""
@@ -126,15 +131,6 @@ class StepperBrake:
         logger.info(f"Augmenting stepper {stepper_name} with brake control")
         self._augment_stepper_with_brake(mcu_stepper)
 
-        # After first stepper is augmented, augment toolhead
-        if len(self.brake_configs) == 1:
-            try:
-                self._augment_toolhead_for_brake_control()
-                self._toolhead_augmented = True
-                logger.info("Toolhead augmented for brake control")
-            except Exception as e:
-                logger.warning(f"Could not augment toolhead: {e}")
-
         # Mark as initialized once we have all configured steppers
         if len(self.brake_configs) >= len(self.stepper_names):
             self.initialized = True
@@ -184,35 +180,71 @@ class StepperBrake:
         })
 
     def _augment_toolhead_for_brake_control(self):
-        """Augment toolhead to control brakes during movement sequences."""
-        toolhead = self.printer.lookup_object("toolhead")
+        """Wrap toolhead.move() to auto-release brakes before any kinematic move."""
+        try:
+            toolhead = self.printer.lookup_object("toolhead")
+        except Exception as e:
+            logger.warning(f"Could not wrap toolhead.move: {e}")
+            return
 
-        # Store original move and dwell methods
         original_move = toolhead.move
-        original_dwell = toolhead.dwell
 
-        # Create wrapper for move that releases brakes
-        def move_with_brake_control(newpos, speed):
-            # Release brakes before movement
+        def move_with_brake_release(newpos, speed):
             if self.release_on_move:
-                for config in self.brake_configs:
-                    config['stepper'].release_brake()
-            # Call original move
+                any_engaged = any(
+                    cfg['stepper']._brake_engaged for cfg in self.brake_configs
+                )
+                if any_engaged:
+                    # Attach release to the end of the previously queued move so
+                    # it fires right at the start time of this new move.
+                    toolhead.register_lookahead_callback(self._do_release_all)
             return original_move(newpos, speed)
 
-        # Create wrapper for dwell that engages brakes
-        def dwell_with_brake_control(delay):
-            # Call original dwell
-            result = original_dwell(delay)
-            # Engage brakes after movement completes
-            if self.engage_on_dwell:
-                for config in self.brake_configs:
-                    config['stepper'].engage_brake()
-            return result
+        toolhead.move = move_with_brake_release
+        self._toolhead_augmented = True
+        logger.info("Wrapped toolhead.move for auto brake release")
 
-        # Replace methods (monkey patch)
-        toolhead.move = move_with_brake_control
-        toolhead.dwell = dwell_with_brake_control
+    def _do_release_all(self, print_time):
+        """Release all brakes at print_time (called as a lookahead callback)."""
+        self._pin_obj.set_digital(print_time, 0)
+        for cfg in self.brake_configs:
+            cfg['stepper']._brake_engaged = False
+        logger.debug("Auto-released all brakes before move")
+
+    def _hook_stepper_enable(self):
+        """Register state callbacks on stepper_enable to engage brakes on M84/M18."""
+        stepper_enable = self.printer.lookup_object("stepper_enable", None)
+        if stepper_enable is None:
+            logger.warning("stepper_enable module not found, cannot hook motor disable")
+            return
+        hooked = 0
+        for cfg in self.brake_configs:
+            name = cfg['name']
+            try:
+                enable_tracking = stepper_enable.lookup_enable(name)
+                enable_tracking.register_state_callback(self._on_stepper_enable_change)
+                hooked += 1
+                logger.info(f"Hooked stepper_enable state callback for {name}")
+            except Exception as e:
+                logger.warning(f"Could not hook stepper_enable for {name}: {e}")
+        if hooked:
+            self._stepper_enable_hooked = True
+
+    def _on_stepper_enable_change(self, print_time, is_enabled):
+        """Called when any braked stepper's enable state changes.
+        Engages all brakes when motors are disabled (M84/M18/end-of-print).
+        """
+        if not is_enabled and self.engage_on_motor_off:
+            # This fires once per registered stepper; guard with any_released
+            # so the shared pin is only written once.
+            any_released = any(
+                not cfg['stepper']._brake_engaged for cfg in self.brake_configs
+            )
+            if any_released:
+                self._pin_obj.set_digital(print_time, 1)
+                for cfg in self.brake_configs:
+                    cfg['stepper']._brake_engaged = True
+                logger.debug("Auto-engaged all brakes on motor disable")
 
     def _register_gcode_commands(self):
         """Register G-code commands for manual brake control."""
