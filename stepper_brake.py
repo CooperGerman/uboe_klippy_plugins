@@ -8,10 +8,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Global stepper brake instance
-_stepper_brake_instance = None
-
-
 class StepperBrake:
     """Klipper plugin to control stepper brakes.
 
@@ -22,8 +18,12 @@ class StepperBrake:
      release_on_move: True
      engage_on_motor_off: True
     """
+
+    # Updated on each init so the permanently-installed PrinterStepper patch
+    # closure always routes stepper registration to the current instance.
+    _current_instance = None
+
     def __init__(self, config):
-        global _stepper_brake_instance
         logger.info("StepperBrake.__init__ called")
         self.printer = config.get_printer()
         self.name = config.get_name()
@@ -44,11 +44,9 @@ class StepperBrake:
         # Create output_pin object programmatically
         self._create_output_pin()
 
-        # Store global reference for monkey-patching.
-        # patched_PrinterStepper is installed on the stepper module permanently.
         # On MCU reset a new StepperBrake instance is created; updating the
-        # global here ensures the old closure routes calls to the new instance.
-        _stepper_brake_instance = self
+        # class-level reference ensures the closure routes to the new instance.
+        StepperBrake._current_instance = self
 
         # Patch stepper module immediately (might fail if not loaded yet, that's OK)
         self._patch_stepper_module()
@@ -89,7 +87,7 @@ class StepperBrake:
             else:
                 from klippy import stepper
 
-            # If already patched by us, just update the global and skip re-wrapping
+            # If already patched by us, just update the class ref and skip re-wrapping
             if getattr(stepper.PrinterStepper, '_stepper_brake_patched', False):
                 logger.info("stepper.PrinterStepper already patched, skipping re-wrap")
                 self._patched = True
@@ -101,10 +99,11 @@ class StepperBrake:
                 mcu_stepper = original_PrinterStepper(config, units_in_radians)
                 stepper_name = mcu_stepper.get_name()
                 logger.info(f"Patched PrinterStepper called for {stepper_name}, calling hook")
-                if _stepper_brake_instance is not None:
-                    _stepper_brake_instance.register_stepper(config, mcu_stepper)
+                instance = StepperBrake._current_instance
+                if instance is not None:
+                    instance.register_stepper(config, mcu_stepper)
                 else:
-                    logger.warning("_stepper_brake_instance is None, cannot register stepper")
+                    logger.warning("No StepperBrake instance available, cannot register stepper")
                 return mcu_stepper
 
             patched_PrinterStepper._stepper_brake_patched = True
@@ -136,53 +135,9 @@ class StepperBrake:
             logger.info(f"Stepper brakes fully initialized with {len(self.brake_configs)} steppers")
 
     def _augment_stepper_with_brake(self, stepper):
-        """Augment a stepper object with brake pin functionality."""
-
-        # Add brake-related attributes to the stepper
+        """Tag a stepper so its brake state can be tracked."""
         stepper._brake_engaged = True  # Default to engaged at startup
-
-        # Add method to engage brake
-        def engage_brake():
-            if not stepper._brake_engaged:
-                try:
-                    toolhead = self.printer.lookup_object('toolhead')
-                    # Update state before registering the callback so any
-                    # concurrent move_with_brake_release call sees the correct
-                    # state and does not stack a redundant release on top.
-                    stepper._brake_engaged = True
-                    toolhead.register_lookahead_callback(
-                        lambda print_time: self._pin_obj.set_digital(print_time, 1)
-                    )
-                    logger.debug(f"Brake engaged for {stepper.get_name()}")
-                except Exception as e:
-                    stepper._brake_engaged = False  # revert on failure
-                    logger.warning(f"Failed to engage brake for {stepper.get_name()}: {e}")
-
-        # Add method to release brake
-        def release_brake():
-            if stepper._brake_engaged:
-                try:
-                    toolhead = self.printer.lookup_object('toolhead')
-                    # Update state before registering so a subsequent engage call
-                    # before the callback fires does not re-release.
-                    stepper._brake_engaged = False
-                    toolhead.register_lookahead_callback(
-                        lambda print_time: self._pin_obj.set_digital(print_time, 0)
-                    )
-                    logger.debug(f"Brake released for {stepper.get_name()}")
-                except Exception as e:
-                    stepper._brake_engaged = True  # revert on failure
-                    logger.warning(f"Failed to release brake for {stepper.get_name()}: {e}")
-
-        # Bind methods to stepper
-        stepper.engage_brake = engage_brake
-        stepper.release_brake = release_brake
-        stepper.get_brake_state = lambda: stepper._brake_engaged
-
-        self.brake_configs.append({
-            'stepper': stepper,
-            'name': stepper.get_name()
-        })
+        self.brake_configs.append({'stepper': stepper, 'name': stepper.get_name()})
 
     def _set_all_brakes(self, print_time, engage):
         """Set the shared brake pin and sync all per-stepper state flags."""
@@ -277,16 +232,18 @@ class StepperBrake:
         stepper_name = gcmd.get("STEPPER", None)
         if stepper_name is None:
             raise gcmd.error("STEPPER parameter required")
-        for cfg in self.brake_configs:
-            if cfg['name'] == stepper_name or cfg['name'] == f"stepper_{stepper_name}":
-                if engage:
-                    cfg['stepper'].engage_brake()
-                    gcmd.respond_info(f"Engaged brake for {cfg['name']}")
-                else:
-                    cfg['stepper'].release_brake()
-                    gcmd.respond_info(f"Released brake for {cfg['name']}")
-                return
-        raise gcmd.error(f"Stepper '{stepper_name}' not found in brake configuration")
+        matched = any(
+            cfg['name'] == stepper_name or cfg['name'] == f"stepper_{stepper_name}"
+            for cfg in self.brake_configs
+        )
+        if not matched:
+            raise gcmd.error(f"Stepper '{stepper_name}' not found in brake configuration")
+        toolhead = self.printer.lookup_object('toolhead')
+        toolhead.register_lookahead_callback(
+            lambda pt: self._set_all_brakes(pt, engage)
+        )
+        action = "Engaged" if engage else "Released"
+        gcmd.respond_info(f"{action} brake for {stepper_name}")
 
     def cmd_STEPPER_BRAKE_ENGAGE(self, gcmd):
         """G-code command to engage brake on a specific stepper."""
@@ -306,10 +263,9 @@ class StepperBrake:
             return
 
         gcmd.respond_info("Stepper brake status:")
-        for config in self.brake_configs:
-            state = "ENGAGED" if config['stepper'].get_brake_state() else "RELEASED"
-            gcmd.respond_info(f"  {config['name']}: {state}")
-
+        for cfg in self.brake_configs:
+            state = "ENGAGED" if cfg['stepper']._brake_engaged else "RELEASED"
+            gcmd.respond_info(f"  {cfg['name']}: {state}")
 
     def cmd_SET_PIN_brake(self, gcmd):
         """Handle SET_PIN PIN=<brake_name> VALUE=0/1 from macros."""
