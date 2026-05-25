@@ -75,7 +75,7 @@ class StepperBrake:
         """Called on emergency stop / klippy shutdown.
 
         The MCU already drives the pin to shutdown_value=0 (brake engaged)
-        immediately on shutdown — no MCU command needed here.
+        immediately on shutdown no MCU command needed here.
         This handler just syncs the software state flags so STATUS reflects
         reality after a restart.
         """
@@ -179,7 +179,7 @@ class StepperBrake:
         The print_time here comes directly from the stepper_enable system:
           - motor_enable: step-generation time (same time the enable pin goes high)
           - motor_disable: get_last_move_time() after a dwell (same time the enable pin goes low)
-        Both contexts are safe for direct set_digital() — same pattern as the
+        Both contexts are safe for direct set_digital() same pattern as the
         stepper enable pin itself. No lookahead indirection needed.
 
         The callback is registered for every braked stepper, so it fires once
