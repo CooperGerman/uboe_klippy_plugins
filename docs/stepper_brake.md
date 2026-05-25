@@ -74,7 +74,7 @@ graph TD
 stateDiagram-v2
     direction LR
 
-    [*] --> Engaged : Klipper starts\n(pin = 0, brake ON)
+    [*] --> Engaged : Klipper starts\n(logical 1 → physical LOW → brake ON)
 
     Engaged --> Released : motor_enable\n(first step scheduled\nfor a move or homing)
 
@@ -82,6 +82,9 @@ stateDiagram-v2
 
     Engaged --> Engaged : motor_disable\n(already engaged — no-op)
     Released --> Released : motor_enable\n(already released — no-op)
+
+    Released --> Engaged : Emergency stop\n(MCU shutdown_value → physical LOW)
+    Engaged --> Engaged : Emergency stop\n(already engaged — no-op)
 ```
 
 The no-op guards prevent writing the shared GPIO pin twice when multiple braked steppers are disabled together in `motor_off()` (both `stepper_x` and `stepper_z` fire the callback at the same `print_time`).
@@ -94,13 +97,13 @@ The no-op guards prevent writing the shared GPIO pin twice when multiple braked 
 flowchart TD
     A([Klipper loads config]) --> B["load_config_prefix()\nStepperBrake.__init__()"]
     B --> C["_register_gcode_commands()\nSTEPPER_BRAKE_*, SET_PIN mux"]
-    C --> D["_create_output_pin()\nsetup_max_duration(0)\nsetup_start_value(0, 0)"]
+    C --> D["_create_output_pin()\nsetup_max_duration(0)\nsetup_start_value(1, 1)"]
     D --> E["_patch_stepper_module()"]
     E --> F{PrinterStepper\nalready patched?}
     F -- No --> G["Wrap PrinterStepper\nset _stepper_brake_patched sentinel"]
-    F -- Yes --> H["Update global reference\n(MCU reset path)"]
+    F -- Yes --> H["Update class ref\n(MCU reset path)"]
     G --> I
-    H --> I["register_event_handler\nklippy:ready"]
+    H --> I["register_event_handler\nklippy:ready + klippy:shutdown"]
 
     I --> J([klippy:ready event])
     J --> K["_hook_stepper_enable()"]
@@ -109,7 +112,7 @@ flowchart TD
     M --> N([Plugin fully active])
 ```
 
-The `PrinterStepper` patch runs at config-load time (before steppers are created). Each new stepper that matches a name in `stepper:` is augmented with `_brake_engaged`, `engage_brake()`, `release_brake()`, and `get_brake_state()` attributes.
+The `PrinterStepper` patch runs at config-load time (before steppers are created). Each new stepper that matches a name in `stepper:` is tagged with a `_brake_engaged` state flag and appended to `brake_configs`.
 
 ---
 
@@ -181,22 +184,35 @@ Manual commands (`ENGAGE`, `RELEASE`, `SET_PIN`) route through `register_lookahe
 
 The plugin uses a standard Klipper `digital_out` pin with `setup_max_duration(0)` to remove the default 2-second cap (which would cause a "Scheduled digital out event will exceed max_duration" shutdown when pin changes are scheduled far ahead in the lookahead queue).
 
-`setup_start_value(0, 0)` sets both the boot value and the emergency-shutdown value to `0` — meaning the physical signal asserted at those times depends on whether the pin is inverted:
+`setup_start_value(1, 1)` sets both the boot value and the emergency-shutdown value to logical `1`. The MCU XORs this with the pin's invert flag before writing the physical line:
 
-| Config pin | `set_digital` value | Physical level | Brake state |
-|-----------|---------------------|----------------|-------------|
-| `!PB4` (inverted) | `0` | HIGH | **Released** |
-| `!PB4` (inverted) | `1` | LOW | **Engaged** |
-| `PB4` (normal) | `0` | LOW | **Released** |
-| `PB4` (normal) | `1` | HIGH | **Engaged** |
+$$\text{physical} = \text{logical} \oplus \text{invert}$$
 
-With an inverted pin (`!PB4`), the brake is engaged when the line is pulled LOW — typical for normally-closed electromagnetic brakes powered by an open-collector/drain output.
+| Config pin | `set_digital` / start value | Physical level | Brake state |
+|-----------|------------------------------|----------------|-------------|
+| `!PB4` (inverted) | `1` (start / shutdown) | LOW | **Engaged** |
+| `!PB4` (inverted) | `0` (release) | HIGH | **Released** |
+| `PB4` (normal) | `1` (start / shutdown) | HIGH | **Engaged** |
+| `PB4` (normal) | `0` (release) | LOW | **Released** |
+
+With an inverted pin (`!PB4`), the brake is engaged when the line is pulled LOW — typical for normally-closed electromagnetic brakes powered by an open-collector/drain output. `setup_start_value(1, 1)` ensures the brake is engaged both at Klipper boot and on any emergency stop or MCU shutdown, with no host-side intervention required.
+
+### Optional: firmware-level startup pin
+
+The `setup_start_value` guarantee takes effect when Klipper Python initialises the pin (a second or two after MCU power-on). For hardware-level assurance from the very first millisecond of power, add `!PB4` to the **"GPIO pins to set at micro-controller startup"** field in `make menuconfig`:
+
+```
+(!PB4) GPIO pins to set at micro-controller startup
+```
+
+The `!` prefix drives the pin LOW at MCU startup (before the host connects), keeping the brake engaged during the boot window.
 
 ---
 
 ## Notes
 
-- **MCU reset** (`FIRMWARE_RESTART`): a new `StepperBrake` instance is created. The global `_stepper_brake_instance` is updated so the permanently-installed `PrinterStepper` patch closure routes calls to the new instance.
+- **MCU reset** (`FIRMWARE_RESTART`): a new `StepperBrake` instance is created. The class attribute `StepperBrake._current_instance` is updated so the permanently-installed `PrinterStepper` patch closure routes calls to the new instance.
+- **Emergency stop**: the `klippy:shutdown` event handler marks all `_brake_engaged` flags `True` in software. The MCU independently drives the pin to its `shutdown_value` (logical `1` → physical LOW → brake engaged) at the hardware level without needing a Python command.
 - **Multiple steppers, one pin**: all steppers listed under `stepper:` share the single GPIO pin. The brake engages or releases together; per-stepper manual commands still operate on the shared pin.
 - **`release_on_move: False`**: disables auto-release on motor enable. The brake must be released manually before motion; useful for testing or fail-safe configurations.
 - **`engage_on_motor_off: False`**: disables auto-engage on motor disable. The brake remains in whatever state it was last set to.

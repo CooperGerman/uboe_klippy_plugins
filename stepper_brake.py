@@ -63,8 +63,10 @@ class StepperBrake:
             # Disable max_duration (default 2s causes "exceed max_duration" shutdown
             # when pin changes are scheduled far ahead via register_lookahead_callback)
             self._pin_obj.setup_max_duration(0)
-            # Start and shutdown value both 0 (brake engaged = pin low by default)
-            self._pin_obj.setup_start_value(0, 0)
+            # Logical 1 XOR invert=True → physical LOW → electromagnet OFF → ENGAGED.
+            # Both start and shutdown values are 1 so the brake is engaged at
+            # boot and on any emergency stop / MCU shutdown.
+            self._pin_obj.setup_start_value(1, 1)
             logger.debug(f"Created GPIO output pin for {self.pin}")
         except Exception as e:
             raise self.printer.config_error(
@@ -74,10 +76,10 @@ class StepperBrake:
     def _on_printer_shutdown(self):
         """Called on emergency stop / klippy shutdown.
 
-        The MCU already drives the pin to shutdown_value=0 (brake engaged)
-        immediately on shutdown no MCU command needed here.
-        This handler just syncs the software state flags so STATUS reflects
-        reality after a restart.
+        The MCU already drives the pin to its shutdown_value (logical 1 →
+        physical LOW → brake engaged) immediately on shutdown; no MCU command
+        needed here.  This handler just syncs the software state flags so
+        STEPPER_BRAKE_STATUS reflects reality after a restart.
         """
         for cfg in self.brake_configs:
             cfg['stepper']._brake_engaged = True
