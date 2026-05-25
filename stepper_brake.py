@@ -81,11 +81,7 @@ class StepperBrake:
     def _patch_stepper_module(self):
         """Monkey-patch the stepper module to integrate our helper registration."""
         try:
-            import sys
-            if 'stepper' in sys.modules:
-                stepper = sys.modules['stepper']
-            else:
-                from klippy import stepper
+            from .. import stepper
 
             # If already patched by us, just update the class ref and skip re-wrapping
             if getattr(stepper.PrinterStepper, '_stepper_brake_patched', False):
