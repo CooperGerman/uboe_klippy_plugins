@@ -279,9 +279,14 @@ class StepperBrake:
             gcmd.respond_info(f"  {cfg['name']}: {state}")
 
     def cmd_SET_PIN_brake(self, gcmd):
-        """Handle SET_PIN PIN=<brake_name> VALUE=0/1 from macros."""
+        """Handle SET_PIN PIN=<brake_name> VALUE=0/1 from macros.
+
+        Convention (matching klipper-macros kinematic_brakes):
+          VALUE=0  → engage   (brake ON  — no power, spring holds)
+          VALUE=1  → release  (brake OFF — electromagnet holds open)
+        """
         value = gcmd.get_float("VALUE", minval=0.0, maxval=1.0)
-        engage = value >= 0.5
+        engage = value < 0.5
         toolhead = self.printer.lookup_object("toolhead")
         toolhead.register_lookahead_callback(
             lambda print_time: self._set_all_brakes(print_time, engage)
