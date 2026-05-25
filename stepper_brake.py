@@ -33,7 +33,6 @@ class StepperBrake:
         self.engage_on_motor_off = config.getboolean("engage_on_motor_off", True)
         self.brake_configs = []
         self.initialized = False
-        self._toolhead_augmented = False
         self._stepper_enable_hooked = False
         self._patched = False
         self._pin_obj = None  # Reference to output_pin object
@@ -74,12 +73,10 @@ class StepperBrake:
             )
 
     def _on_printer_ready(self):
-        """Called when printer is ready: patch stepper module, wrap toolhead.move,
-        and hook stepper_enable for auto engage/release."""
+        """Called when printer is ready: patch stepper module and hook
+        stepper_enable callbacks for auto engage/release."""
         if not self._patched:
             self._patch_stepper_module()
-        if not self._toolhead_augmented:
-            self._augment_toolhead_for_brake_control()
         if not self._stepper_enable_hooked:
             self._hook_stepper_enable()
 
@@ -187,41 +184,11 @@ class StepperBrake:
             'name': stepper.get_name()
         })
 
-    def _augment_toolhead_for_brake_control(self):
-        """Wrap toolhead.move() to auto-release brakes before any kinematic move."""
-        try:
-            toolhead = self.printer.lookup_object("toolhead")
-        except Exception as e:
-            logger.warning(f"Could not wrap toolhead.move: {e}")
-            return
-
-        original_move = toolhead.move
-
-        def move_with_brake_release(newpos, speed):
-            if self.release_on_move:
-                any_engaged = any(
-                    cfg['stepper']._brake_engaged for cfg in self.brake_configs
-                )
-                if any_engaged:
-                    # Attach release to the end of the previously queued move so
-                    # it fires right at the start time of this new move.
-                    toolhead.register_lookahead_callback(self._do_release_all)
-            return original_move(newpos, speed)
-
-        toolhead.move = move_with_brake_release
-        self._toolhead_augmented = True
-        logger.info("Wrapped toolhead.move for auto brake release")
-
     def _set_all_brakes(self, print_time, engage):
         """Set the shared brake pin and sync all per-stepper state flags."""
         self._pin_obj.set_digital(print_time, 1 if engage else 0)
         for cfg in self.brake_configs:
             cfg['stepper']._brake_engaged = engage
-
-    def _do_release_all(self, print_time):
-        """Release all brakes at print_time (called as a lookahead callback)."""
-        self._set_all_brakes(print_time, False)
-        logger.debug("Auto-released all brakes before move")
 
     def _hook_stepper_enable(self):
         """Register state callbacks on stepper_enable to engage brakes on M84/M18."""
@@ -244,28 +211,29 @@ class StepperBrake:
 
     def _on_stepper_enable_change(self, print_time, is_enabled):
         """Called when any braked stepper's enable state changes.
-        Engages all brakes when motors are disabled (M84/M18/end-of-print).
+
+        The print_time here comes directly from the stepper_enable system:
+          - motor_enable: step-generation time (same time the enable pin goes high)
+          - motor_disable: get_last_move_time() after a dwell (same time the enable pin goes low)
+        Both contexts are safe for direct set_digital() — same pattern as the
+        stepper enable pin itself. No lookahead indirection needed.
+
+        The callback is registered for every braked stepper, so it fires once
+        per stepper per event. The any_engaged/any_released guards ensure the
+        shared brake pin is only written once regardless of stepper count.
         """
-        if not is_enabled and self.engage_on_motor_off:
-            # This fires once per registered stepper; guard with any_released
-            # so the shared pin is only written once.
-            any_released = any(
+        if is_enabled:
+            if self.release_on_move and any(
+                cfg['stepper']._brake_engaged for cfg in self.brake_configs
+            ):
+                self._set_all_brakes(print_time, False)
+                logger.debug("Auto-released brakes on motor enable")
+        else:
+            if self.engage_on_motor_off and any(
                 not cfg['stepper']._brake_engaged for cfg in self.brake_configs
-            )
-            if any_released:
-                # Update state flags immediately so a second call for another
-                # braked stepper is a no-op (shared pin must only be written once).
-                for cfg in self.brake_configs:
-                    cfg['stepper']._brake_engaged = True
-                # Schedule pin change through the lookahead system rather than
-                # calling set_digital() directly. At end-of-print the print_time
-                # from motor_off() can be very close to the current MCU clock
-                # and direct scheduling risks a "Timer too close" MCU shutdown.
-                toolhead = self.printer.lookup_object('toolhead')
-                toolhead.register_lookahead_callback(
-                    lambda pt: self._pin_obj.set_digital(pt, 1)
-                )
-                logger.debug("Auto-engaged all brakes on motor disable")
+            ):
+                self._set_all_brakes(print_time, True)
+                logger.debug("Auto-engaged brakes on motor disable")
 
     def _register_gcode_commands(self):
         """Register G-code commands for manual brake control."""
