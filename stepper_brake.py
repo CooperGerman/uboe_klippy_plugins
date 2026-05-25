@@ -53,6 +53,7 @@ class StepperBrake:
 
         # Also register event handler to try again after printer is ready as fallback
         self.printer.register_event_handler("klippy:ready", self._on_printer_ready)
+        self.printer.register_event_handler("klippy:shutdown", self._on_printer_shutdown)
 
     def _create_output_pin(self):
         """Create a GPIO output pin."""
@@ -69,6 +70,18 @@ class StepperBrake:
             raise self.printer.config_error(
                 f"Failed to setup GPIO pin {self.pin}: {e}"
             )
+
+    def _on_printer_shutdown(self):
+        """Called on emergency stop / klippy shutdown.
+
+        The MCU already drives the pin to shutdown_value=0 (brake engaged)
+        immediately on shutdown — no MCU command needed here.
+        This handler just syncs the software state flags so STATUS reflects
+        reality after a restart.
+        """
+        for cfg in self.brake_configs:
+            cfg['stepper']._brake_engaged = True
+        logger.info("Emergency stop: brake state flags set to ENGAGED")
 
     def _on_printer_ready(self):
         """Called when printer is ready: patch stepper module and hook
