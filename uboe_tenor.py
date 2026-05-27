@@ -11,7 +11,7 @@ from configfile import (
 )
 from toolhead import ToolHead
 from stepper import (
-	PrinterRail,
+	GenericPrinterRail,
  	error as StepperError
 )
 from kinematics.ratos_hybrid_corexy import RatOSHybridCoreXYKinematics
