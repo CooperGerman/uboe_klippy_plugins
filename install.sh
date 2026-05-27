@@ -34,6 +34,13 @@ for f in "${SCRIPT_DIR}"/*.py ; do
 		rm -f "${KLIPPY_DIR}/extras/${base}"
 		ln -sf "${SCRIPT_DIR}/${base}" "${KLIPPY_DIR}/extras/${base}"
 		echo "Linked: ${base}"
+
+		# Add the symlinked file to git's local exclude list to avoid it showing as untracked
+		exclude_entry="klippy/extras/${base}"
+		if ! grep -qF "${exclude_entry}" "${HOME}/klipper/.git/info/exclude"; then
+			echo "${exclude_entry}" >> "${HOME}/klipper/.git/info/exclude"
+			echo "Added to git exclude: ${exclude_entry}"
+		fi
 	fi
 done
 
