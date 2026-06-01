@@ -62,7 +62,7 @@ class UboeTenor:
 		self.gcode.register_command('HEATSOAK', self.cmd_HEATSOAK, desc=self.cmd_heatsoaK_help)
 		self.gcode.register_command('ECHO_UBOE_TENOR', self.cmd_echo_uboe_tenor, desc=self.cmd_echo_uboe_tenor_help)
 
-	def _motor_off(self, print_time):
+	def _motor_off(self, print_time=None):
 		self.cmd_set_z_safeguards(None)
 		if self.safeguard_state:
 			self.safeguard_state = None
