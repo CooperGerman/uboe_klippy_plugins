@@ -29,10 +29,6 @@ class UboeTenor:
 		self.woken_up = False
 		self.kin_tmc_drivers = {}
 
-		# z offset
-		self.z_offset_probe_x_coord = config.getfloat('z_offset_probe_x_coord')
-		self.z_offset_probe_y_coord = config.getfloat('z_offset_probe_y_coord')
-
 		# z safeguard
 		self.z_safeguard_speed = config.getfloat('z_safeguard_speed', None, above=0.)
 		self.z_safeguard_retract_dist = config.getfloat('z_safeguard_retract_dist', None, above=0.)
@@ -394,8 +390,6 @@ Iterate over multiple probe commands to analyze heatsoaking effects.
 		msg = ["Idle motor configuration:"]
 		msg.append("	- idle_motor_current_percentage: %s" % (self.idle_motor_current_percentage,))
 		msg.append("Safeguarding configuration:")
-		msg.append("	- z_offset_probe_x_coord: %s" % (self.z_offset_probe_x_coord,))
-		msg.append("	- z_offset_probe_y_coord: %s" % (self.z_offset_probe_y_coord,))
 		msg.append("	- z_safeguard_speed: %s" % (self.z_safeguard_speed,))
 		msg.append("	- z_safeguard_retract_dist: %s" % (self.z_safeguard_retract_dist,))
 		msg.append("	- z_safeguard_retract_speed: %s" % (self.safeguard_rail.homing_retract_speed,))
@@ -411,9 +405,7 @@ Iterate over multiple probe commands to analyze heatsoaking effects.
 	def get_status(self, evnttime):
 		return {
 			"safeguard_state": self.safeguard_state,
-			"woken_up": self.woken_up,
-			"z_offset_probe_x_coord": self.z_offset_probe_x_coord,
-			"z_offset_probe_y_coord": self.z_offset_probe_y_coord,
+			"woken_up": self.woken_up
 		}
 
 def load_config(config):
