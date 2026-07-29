@@ -56,6 +56,7 @@ class UboeTenor:
 		self.gcode.register_command('IDLE_MOTORS', self.cmd_idle_motors, desc=self.cmd_idle_motors_help)
 		self.gcode.register_command('WAKE_UP', self.cmd_wake_up, desc=self.cmd_wake_up_help)
 		self.gcode.register_command('HEATSOAK', self.cmd_HEATSOAK, desc=self.cmd_heatsoaK_help)
+		self.gcode.register_command('SET_PROBE_OFFSET', self.cmd_SET_PROBE_OFFSET, desc=self.cmd_SET_PROBE_OFFSET_help)
 		self.gcode.register_command('ECHO_UBOE_TENOR', self.cmd_echo_uboe_tenor, desc=self.cmd_echo_uboe_tenor_help)
 
 	def _motor_off(self, print_time=None):
@@ -383,6 +384,35 @@ Iterate over multiple probe commands to analyze heatsoaking effects.
 			msg.append("The machine did not stabilize within the provided %s iterations over %s seconds (tolerance %.2fmm)." % (iterations, max_duration, tolerance))
 			msg.append("Consider increasing the number of iterations or the tolerance.")
 		self.ratos.console_echo(title, 'info', ('_N_'.join(msg)))
+
+	cmd_SET_PROBE_OFFSET_help = "Overwrite the otherwisse immuable probe offset values at runtime. Only affects [probe] x/y/z offsets"
+	def cmd_SET_PROBE_OFFSET(self, gcmd):
+		probe = self.printer.lookup_object('probe')
+		offsets = [None, None, None]
+		for pos, axis in enumerate('XYZ'):
+			offset = gcmd.get_float(axis, None)
+			if offset is None:
+				offset = gcmd.get_float(axis + '_ADJUST', None)
+				if offset is None:
+					continue
+				offset = probe.get_offsets(gcmd)[pos] - offset
+			offsets[pos] = offset
+
+		if all(o is None for o in offsets):
+			gcmd.respond_info("Nothing to do: No offset value or adjustment provided for any axis.")
+			return
+
+		for pos, axis in enumerate('XYZ'):
+			offset = offsets[pos]
+			if offset is None:
+				continue
+			gcmd.respond_info(
+				"%s: %s_offset: %.3f\n"
+				"The SAVE_CONFIG command will update the printer config file\n"
+				"with the above and restart the printer."
+				% (probe.cmd_helper.name, axis.lower(), offset))
+			configfile = self.printer.lookup_object('configfile')
+			configfile.set(probe.cmd_helper.name, '%s_offset' % axis.lower(), "%.3f" % (offset))
 
 	cmd_echo_uboe_tenor_help = "Echo UboeTenor configuration"
 	def cmd_echo_uboe_tenor(self, gcmd):
