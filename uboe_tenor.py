@@ -410,9 +410,9 @@ Iterate over multiple probe commands to analyze heatsoaking effects.
 				"%s: %s_offset: %.3f\n"
 				"The SAVE_CONFIG command will update the printer config file\n"
 				"with the above and restart the printer."
-				% (probe.cmd_helper.name, axis.lower(), offset))
+				% (probe.name, axis.lower(), offset))
 			configfile = self.printer.lookup_object('configfile')
-			configfile.set(probe.cmd_helper.name, '%s_offset' % axis.lower(), "%.3f" % (offset))
+			configfile.set(probe.name, '%s_offset' % axis.lower(), "%.3f" % (offset))
 
 	cmd_echo_uboe_tenor_help = "Echo UboeTenor configuration"
 	def cmd_echo_uboe_tenor(self, gcmd):
