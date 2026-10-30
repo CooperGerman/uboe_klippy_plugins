@@ -49,7 +49,6 @@ clean:
 super_clean: clean
 	rm -rf ./env
 
-# ./pip.sh check requirements.txt
 help :
 	@echo "make help                : prints this help"
 
