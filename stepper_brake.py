@@ -96,9 +96,7 @@ class StepperBrake:
     def _patch_stepper_module(self):
         """Monkey-patch the stepper module to integrate our helper registration."""
         try:
-            from .. import stepper
-
-            # If already patched by us, just update the class ref and skip re-wrapping
+            import stepper  # If already patched by us, just update the class ref and skip re-wrapping
             if getattr(stepper.PrinterStepper, '_stepper_brake_patched', False):
                 logger.info("stepper.PrinterStepper already patched, skipping re-wrap")
                 self._patched = True
