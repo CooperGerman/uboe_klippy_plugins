@@ -19,7 +19,7 @@
 
 set -e
 
-cd /home/uboe/uboe_klippy_plugins
+cd "${HOME}/uboe_klippy_plugins"
 git pull --rebase --autostash
 ./install.sh
 
