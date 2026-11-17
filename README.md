@@ -59,3 +59,39 @@ The table below lists the plugins and their functionality.
 | | `STEPPER_BRAKE_ENGAGE STEPPER=<name>` command | Manually engages the brake for a specific stepper. |
 | | `STEPPER_BRAKE_RELEASE STEPPER=<name>` command | Manually releases the brake for a specific stepper. |
 | | `SET_PIN PIN=<brake_name> VALUE=0/1` command | Compatible with standard Klipper macro syntax to engage (1) or release (0) the brake. |
+
+## IDEX input shaper capture
+
+After updating the plugin's Python code, restart the Klipper service to load
+it. The `RESTART` and `FIRMWARE_RESTART` G-code commands do not reload Python
+modules in the running Klipper process.
+
+Set `shaper_config_path` in `[uboe_tenor]` to the included file containing the four
+`variable_shaper_{x,y}_{type,freq}` settings under `[gcode_macro RatOS]`.
+After homing and selecting single mode, a full capture runs:
+
+```gcode
+UBOE_SHAPER_CAPTURE MODE=START
+UBOE_SHAPER_CAPTURE MODE=SINGLE
+GENERATE_SHAPER_GRAPHS
+IDEX_COPY
+UBOE_SHAPER_CAPTURE MODE=COPY
+GENERATE_SHAPER_GRAPHS
+IDEX_MIRROR
+UBOE_SHAPER_CAPTURE MODE=MIRROR
+GENERATE_SHAPER_GRAPHS
+UBOE_SHAPER_CAPTURE MODE=FINISH
+```
+
+The capture requires X and Y measurements from both toolheads in each mode.
+It follows the [Rat Rig IDEX commissioning guide](https://wiki.ratrig.com/products/v-core-4-1/commissioning-guide/idex/03-calibration#h-03-input-shaper):
+MZV is fitted separately to each measurement, and COPY/MIRROR frequencies are
+the mean of the corresponding toolhead frequencies. Fits use the graph script's
+default square corner velocity of 5 mm/s; acceleration estimates use the
+current printer setting. FINISH writes the four
+settings to the configured file and keeps a `.bak` copy. Restart Klipper to
+apply them; `SAVE_CONFIG` is not used. If a run fails or is interrupted, use
+`UBOE_SHAPER_CAPTURE MODE=ABORT` or start a new capture.
+
+The reported acceleration values estimate input-shaper smoothing, not safe
+mechanical limits. Neither acceleration nor speed limits are changed.
