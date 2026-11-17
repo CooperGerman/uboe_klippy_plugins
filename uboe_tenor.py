@@ -2,7 +2,13 @@ import gc
 import sys
 import copy
 import logging
+import os
+import re
+import stat
+import tempfile
+import time
 import mcu
+from extras import shaper_calibrate, shaper_defs
 from extras.tmc import TMCCommandHelper
 
 from configfile import (
@@ -23,6 +29,8 @@ class UboeTenor:
 		self.gcode = self.printer.lookup_object('gcode')
 		self.ratos = self.printer.lookup_object('ratos')
 		self.toolhead = None
+		self.shaper_config_path = config.get('shaper_config_path', None)
+		self.shaper_capture = None
 		mcu.TRSYNC_TIMEOUT = config.getfloat('trsync_timeout', 0.05, above=0.)
 		# motor idling
 		self.idle_motor_current_percentage = config.getfloat('idle_motor_current_percentage', 100.0, above=0., below=100.)
@@ -58,6 +66,193 @@ class UboeTenor:
 		self.gcode.register_command('HEATSOAK', self.cmd_HEATSOAK, desc=self.cmd_heatsoaK_help)
 		self.gcode.register_command('SET_PROBE_OFFSET', self.cmd_SET_PROBE_OFFSET, desc=self.cmd_SET_PROBE_OFFSET_help)
 		self.gcode.register_command('ECHO_UBOE_TENOR', self.cmd_echo_uboe_tenor, desc=self.cmd_echo_uboe_tenor_help)
+		self.gcode.register_command('UBOE_SHAPER_CAPTURE', self.cmd_UBOE_SHAPER_CAPTURE, desc=self.cmd_UBOE_SHAPER_CAPTURE_help)
+
+	def _stop_shaper_capture(self):
+		if self.shaper_capture is not None:
+			tester = self.shaper_capture['tester']
+			tester.save_calibration_data = self.shaper_capture['original_save']
+			self.shaper_capture = None
+
+	def _capture_shaper_data(self, base_name, name_suffix, helper, axis,
+							 calibration_data, all_shapers=None, point=None, max_freq=None):
+		session = self.shaper_capture
+		path = session['original_save'](base_name, name_suffix, helper, axis,
+									   calibration_data, all_shapers, point, max_freq)
+		mode = session['mode']
+		if base_name != 'resonances' or mode is None:
+			return path
+		axis_name = axis.get_name().lower()
+		expected = {'single': ('t0', 't1'), 'copy': ('t0_copy', 't1_copy'),
+					'mirror': ('t0_mirror', 't1_mirror')}
+		if axis_name not in ('x', 'y') or name_suffix not in expected[mode]:
+			return path
+		carriage_mode = self.printer.lookup_object('dual_carriage').get_status()['carriage_1'].lower()
+		if (mode == 'single' and carriage_mode not in ('primary', 'inactive')
+				or mode != 'single' and carriage_mode != mode):
+			raise self.printer.command_error("Shaper capture mode changed from %s to %s" % (mode, carriage_mode))
+		key = (mode, name_suffix[:2], axis_name)
+		if key in session['measurements']:
+			raise self.printer.command_error("Duplicate input shaper measurement: %s" % (key,))
+		try:
+			np = helper.numpy
+			with open(path, 'r') as source:
+				header = source.readline().strip()
+				if header != 'freq,psd_x,psd_y,psd_z,psd_xyz':
+					raise ValueError("unexpected CSV header")
+				values = np.genfromtxt(source, delimiter=',', dtype=np.float64)
+			if (values.ndim != 2 or values.shape[0] < 2 or values.shape[1] != 5
+					or not np.isfinite(values).all()
+					or not np.all(np.diff(values[:, 0]) > 0)
+					or np.any(values[:, 1:] < 0)
+					or not np.any(values[:, 4] > 0)):
+				raise ValueError("invalid or empty resonance data")
+		except (OSError, ValueError) as e:
+			raise self.printer.command_error("Cannot capture shaper data %s: %s" % (path, e))
+		data = shaper_calibrate.CalibrationData(
+			name=path, freq_bins=values[:, 0], psd_x=values[:, 1],
+			psd_y=values[:, 2], psd_z=values[:, 3], psd_sum=values[:, 4])
+		data.set_numpy(np)
+		data.normalize_to_frequencies()
+		session['measurements'][key] = data
+		return path
+
+	def _write_shaper_config(self, values):
+		path = os.path.realpath(os.path.expanduser(self.shaper_config_path))
+		with open(path, 'rb') as source:
+			original = source.read()
+			mode = stat.S_IMODE(os.fstat(source.fileno()).st_mode)
+		text = original.decode('utf-8')
+		lines = text.splitlines(keepends=True)
+		section = None
+		found_section = 0
+		found = set()
+		section_pattern = re.compile(r'^\s*\[([^]]+)\]\s*(?:[#;].*)?$')
+		option_pattern = re.compile(r'^(\s*)(variable_shaper_[xy]_(?:freq|type))\s*[:=]\s*([^#;\r\n]*?)(\s*(?:[#;][^\r\n]*)?)(\r?\n)?$', re.I)
+		for i, line in enumerate(lines):
+			section_match = section_pattern.match(line.rstrip('\r\n'))
+			if section_match:
+				section = section_match.group(1).strip().lower()
+				if section == 'gcode_macro ratos':
+					found_section += 1
+				continue
+			if section != 'gcode_macro ratos':
+				continue
+			match = option_pattern.match(line)
+			if match:
+				option = match.group(2).lower()
+				if option in found:
+					raise ValueError("Duplicate %s in %s" % (option, path))
+				found.add(option)
+				lines[i] = '%s%s: %s%s%s' % (match.group(1), match.group(2),
+											 values[option], match.group(4), match.group(5) or '')
+		if found_section != 1 or found != set(values):
+			raise ValueError("Expected one [gcode_macro RatOS] section with all four shaper variables in %s" % path)
+		updated = ''.join(lines).encode('utf-8')
+		directory = os.path.dirname(path)
+		temp_path = None
+		try:
+			fd, temp_path = tempfile.mkstemp(prefix='.uboe-shaper-', dir=directory)
+			with os.fdopen(fd, 'wb') as target:
+				os.fchmod(target.fileno(), mode)
+				target.write(updated)
+				target.flush()
+				os.fsync(target.fileno())
+			with open(path, 'rb') as source:
+				if source.read() != original:
+					raise ValueError("Shaper config changed during analysis; refusing to overwrite it")
+			backup = '%s.%s.bak' % (path, time.time_ns())
+			with open(backup, 'xb') as target:
+				target.write(original)
+				target.flush()
+				os.fsync(target.fileno())
+			os.replace(temp_path, path)
+			temp_path = None
+			return backup
+		finally:
+			if temp_path is not None:
+				os.unlink(temp_path)
+
+	cmd_UBOE_SHAPER_CAPTURE_help = "Capture IDEX shaper measurements and write RatOS MZV settings"
+	def cmd_UBOE_SHAPER_CAPTURE(self, gcmd):
+		mode = gcmd.get('MODE').lower()
+		if mode == 'abort':
+			self._stop_shaper_capture()
+			gcmd.respond_info("Input shaper capture aborted.")
+			return
+		if mode == 'start':
+			if not self.shaper_config_path:
+				raise gcmd.error("Set shaper_config_path in [uboe_tenor] before starting shaper capture")
+			self._stop_shaper_capture()
+			tester = self.printer.lookup_object('resonance_tester')
+			self.shaper_capture = {'tester': tester, 'original_save': tester.save_calibration_data,
+								   'mode': None, 'measurements': {}}
+			tester.save_calibration_data = self._capture_shaper_data
+			gcmd.respond_info("Input shaper capture started.")
+			return
+		if self.shaper_capture is None:
+			raise gcmd.error("Input shaper capture has not been started")
+		session = self.shaper_capture
+		modes = ('single', 'copy', 'mirror')
+		if mode in modes:
+			index = modes.index(mode)
+			if session['mode'] != (modes[index - 1] if index else None):
+				raise gcmd.error("Input shaper capture modes must run in order: SINGLE, COPY, MIRROR")
+			if index:
+				previous = modes[index - 1]
+				missing = [(previous, tool, axis) for tool in ('t0', 't1') for axis in ('x', 'y')
+						   if (previous, tool, axis) not in session['measurements']]
+				if missing:
+					raise gcmd.error("Missing input shaper measurements: %s" % (missing,))
+			carriage_mode = self.printer.lookup_object('dual_carriage').get_status()['carriage_1'].lower()
+			if (mode == 'single' and carriage_mode not in ('primary', 'inactive')
+					or mode != 'single' and carriage_mode != mode):
+				raise gcmd.error("Cannot capture %s data while carriage 1 is %s" % (mode, carriage_mode))
+			session['mode'] = mode
+			return
+		if mode != 'finish':
+			raise gcmd.error("MODE must be START, SINGLE, COPY, MIRROR, FINISH or ABORT")
+		missing = [(m, tool, axis) for m in modes for tool in ('t0', 't1') for axis in ('x', 'y')
+				   if (m, tool, axis) not in session['measurements']]
+		if session['mode'] != 'mirror' or missing:
+			raise gcmd.error("Incomplete input shaper run; missing measurements: %s" % (missing,))
+		self._stop_shaper_capture()
+		helper = shaper_calibrate.ShaperCalibrate(self.printer)
+		scv = self.toolhead.get_status(self.printer.get_reactor().monotonic())['square_corner_velocity']
+		frequencies = {}
+		for axis in ('x', 'y'):
+			for measurement_mode in modes:
+				for tool in ('t0', 't1'):
+					key = (measurement_mode, tool, axis)
+					_, candidates = helper.find_best_shaper(session['measurements'][key], scv=5.)
+					mzv = next((candidate for candidate in candidates if candidate.name == 'mzv'), None)
+					if mzv is None:
+						raise gcmd.error("Klipper did not produce an MZV fit for %s" % (key,))
+					frequencies[key] = round(mzv.freq, 1)
+					gcmd.respond_info("%s %s %s: MZV %.1f Hz" % (measurement_mode, tool, axis.upper(), frequencies[key]))
+		values = {}
+		limits = []
+		for axis in ('x', 'y'):
+			freqs = [frequencies[('single', 't0', axis)], frequencies[('single', 't1', axis)]]
+			for measurement_mode in ('copy', 'mirror'):
+				freqs.append(round((frequencies[(measurement_mode, 't0', axis)]
+									+ frequencies[(measurement_mode, 't1', axis)]) / 2., 2))
+			values['variable_shaper_%s_freq' % axis] = repr(freqs)
+			values['variable_shaper_%s_type' % axis] = repr(['mzv'] * 4)
+			for name, freq in zip(('T0', 'T1', 'COPY', 'MIRROR'), freqs):
+				shaper = shaper_defs.init_shaper('mzv', freq, shaper_defs.DEFAULT_DAMPING_RATIO)
+				limit = helper.find_shaper_max_accel(shaper, scv)
+				limits.append(limit)
+				gcmd.respond_info("%s %s: MZV %.2f Hz, estimated smoothing limit %.0f mm/s^2" %
+								  (name, axis.upper(), freq, limit))
+		try:
+			backup = self._write_shaper_config(values)
+		except (OSError, UnicodeError, ValueError) as e:
+			raise gcmd.error("Unable to update input shaper configuration: %s" % e)
+		gcmd.respond_info("Updated %s (backup: %s). Restart Klipper to apply. "
+						  "Lowest estimated smoothing limit: %.0f mm/s^2; "
+						  "validate acceleration mechanically and in prints. No speed or acceleration limits were changed."
+						  % (self.shaper_config_path, backup, min(limits)))
 
 	def _motor_off(self, print_time=None):
 		self.cmd_set_z_safeguards(None)
