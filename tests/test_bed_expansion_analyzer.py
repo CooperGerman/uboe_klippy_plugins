@@ -206,6 +206,19 @@ class BedExpansionStateTests(unittest.TestCase):
             self.assertEqual(plugin.stable_count, 0)
             self.assertEqual(plugin.phase, "interval")
 
+    def test_failure_elapsed_time_uses_current_monotonic_time(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            plugin = self.make_plugin(output_dir)
+            plugin.run_file = os.path.join(output_dir, "run.jsonl")
+            plugin.reactor.current_time = 310.
+            plugin.analysis_started_at = 100.
+
+            plugin._finish_run(25., "failed", "mesh failure")
+
+            with open(plugin.run_file) as result_file:
+                records = [json.loads(line) for line in result_file]
+            self.assertEqual(records[-1]["elapsed_s"], 210.)
+
     def test_preparation_uses_synchronous_klipper_commands(self):
         with tempfile.TemporaryDirectory() as output_dir:
             plugin = self.make_plugin(output_dir)
@@ -214,7 +227,8 @@ class BedExpansionStateTests(unittest.TestCase):
             toolhead = SimpleNamespace(
                 get_status=lambda eventtime: {"homed_axes": ""})
             bed_mesh = SimpleNamespace(
-                bmc=SimpleNamespace(probe_mgr=SimpleNamespace(speed=100.)),
+                bmc=SimpleNamespace(probe_mgr=SimpleNamespace(
+                    probe_helper=SimpleNamespace(speed=100.))),
                 get_mesh=lambda: FakeZMesh([[0., 0.], [0., 0.]]))
             heater = SimpleNamespace(get_temp=lambda eventtime: (85., 85.))
             heaters = SimpleNamespace(lookup_heater=lambda name: heater)
@@ -288,7 +302,8 @@ class BedExpansionStateTests(unittest.TestCase):
             observed_speeds = []
 
             class ProbeManager:
-                speed = 100.
+                def __init__(self):
+                    self.probe_helper = SimpleNamespace(speed=100.)
 
             probe_manager = ProbeManager()
             bed_mesh = SimpleNamespace(
@@ -298,13 +313,14 @@ class BedExpansionStateTests(unittest.TestCase):
                 lookup_object=lambda name: bed_mesh)
             plugin.gcode.run_script_from_command = (
                 lambda script: (
-                    observed_speeds.append((script, probe_manager.speed)),
+                    observed_speeds.append(
+                        (script, probe_manager.probe_helper.speed)),
                     setattr(plugin.reactor, "current_time", 55.),
                 ))
 
             plugin._start_mesh_scan(10.)
 
-            self.assertEqual(probe_manager.speed, 100.)
+            self.assertEqual(probe_manager.probe_helper.speed, 100.)
             self.assertEqual(observed_speeds, [(
                 "BED_MESH_CALIBRATE METHOD=rapid "
                 "PROFILE=__bed_expansion_analysis__ "
@@ -325,7 +341,8 @@ class BedExpansionStateTests(unittest.TestCase):
                 "mesh_max": None,
             })
             bed_mesh = SimpleNamespace(
-                bmc=SimpleNamespace(probe_mgr=SimpleNamespace(speed=100.)),
+                bmc=SimpleNamespace(probe_mgr=SimpleNamespace(
+                    probe_helper=SimpleNamespace(speed=100.))),
                 get_mesh=lambda: FakeZMesh([[0., 0.], [0., 0.]]))
             plugin.printer = SimpleNamespace(
                 lookup_object=lambda name: bed_mesh)
@@ -350,7 +367,8 @@ class BedExpansionStateTests(unittest.TestCase):
             plugin.rehome_z_before_scan = True
             plugin.reactor.current_time = 10.
             bed_mesh = SimpleNamespace(
-                bmc=SimpleNamespace(probe_mgr=SimpleNamespace(speed=100.)),
+                bmc=SimpleNamespace(probe_mgr=SimpleNamespace(
+                    probe_helper=SimpleNamespace(speed=100.))),
                 get_mesh=lambda: FakeZMesh([[0., 0.], [0., 0.]]))
             plugin.printer = SimpleNamespace(
                 lookup_object=lambda name: bed_mesh)
