@@ -118,6 +118,7 @@ stable_window: 5
 target_tolerance: 0.5
 park_macro: PARK
 rehome_z_before_scan: True
+relevel_before_scan: True
 render_on_finish: True
 render_mode: baseline
 render_view: surface
@@ -142,7 +143,10 @@ The analyzer:
 2. Runs `QUAD_GANTRY_LEVEL` or `Z_TILT_ADJUST` when either module is present.
 3. Sets the requested bed target and waits until it is within
    `target_tolerance`.
-4. Clears the active mesh and rehomes Z immediately before each scan.
+4. Clears the active mesh, reruns QGL/Z-tilt when configured, and rehomes Z
+   immediately before each scan. Releveling removes accumulating gantry tilt so
+   each sample matches the geometry established by a print-start leveling
+   procedure.
 5. Captures a bed mesh immediately, then waits the configured interval after
    that mesh completes before starting the next scan. A slow mesh therefore
    never causes scans to overlap or bunch together.

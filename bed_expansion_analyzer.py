@@ -83,6 +83,8 @@ class BedExpansionAnalyzer:
         self.park_macro = config.get("park_macro", "PARK").strip()
         self.rehome_z_before_scan = config.getboolean(
             "rehome_z_before_scan", True)
+        self.relevel_before_scan = config.getboolean(
+            "relevel_before_scan", True)
         self.printer_data_dir = self._printer_data_dir(
             self.printer.get_start_args())
         self.render_on_finish = config.getboolean(
@@ -294,8 +296,13 @@ class BedExpansionAnalyzer:
             % (mode, self.run_file))
 
     def _start_mesh_scan(self, eventtime):
-        if self.rehome_z_before_scan:
+        if self.relevel_before_scan or self.rehome_z_before_scan:
             self.gcode.run_script_from_command("BED_MESH_CLEAR")
+        if self.relevel_before_scan:
+            _, level_command = self._find_leveler()
+            if level_command is not None:
+                self.gcode.run_script_from_command(level_command)
+        if self.rehome_z_before_scan:
             self.gcode.run_script_from_command("G28 Z")
         self._perform_mesh_scan()
 

@@ -149,6 +149,7 @@ class BedExpansionStateTests(unittest.TestCase):
         plugin.timer = object()
         plugin.park_macro = "PARK"
         plugin.rehome_z_before_scan = False
+        plugin.relevel_before_scan = False
         plugin.render_on_finish = False
         plugin.target_tolerance = .5
         plugin.output_dir = output_dir
@@ -442,6 +443,37 @@ class BedExpansionStateTests(unittest.TestCase):
             )
             self.assertEqual(plugin.phase, "stable")
             self.assertEqual(plugin.active, False)
+
+    def test_mesh_scan_relevels_before_rehoming_and_scanning(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            plugin = self.make_plugin(output_dir)
+            plugin.run.update({
+                "mesh_command": "BED_MESH_CALIBRATE",
+                "speed": None,
+                "probe_count": None,
+                "mesh_min": None,
+                "mesh_max": None,
+            })
+            plugin.relevel_before_scan = True
+            plugin.rehome_z_before_scan = True
+            plugin._find_leveler = lambda: (
+                SimpleNamespace(), "QUAD_GANTRY_LEVEL")
+            bed_mesh = SimpleNamespace(
+                bmc=SimpleNamespace(probe_mgr=SimpleNamespace(
+                    probe_helper=SimpleNamespace(speed=100.))),
+                get_mesh=lambda: FakeZMesh([[0., 0.], [0., 0.]]))
+            plugin.printer = SimpleNamespace(
+                lookup_object=lambda name: bed_mesh)
+
+            plugin._start_mesh_scan(10.)
+
+            self.assertEqual(plugin.gcode.scripts[:4], [
+                "BED_MESH_CLEAR",
+                "QUAD_GANTRY_LEVEL",
+                "G28 Z",
+                "BED_MESH_CALIBRATE "
+                "PROFILE=__bed_expansion_analysis__",
+            ])
 
     def test_load_restores_saved_sample_and_optional_profile(self):
         with tempfile.TemporaryDirectory() as output_dir:
