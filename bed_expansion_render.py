@@ -58,13 +58,19 @@ def prepare_frames(samples, mode):
     return numpy.asarray(frames)
 
 
-def render_gif(samples, output_path, mode="baseline", fps=1.0, dpi=120):
+def render_gif(
+    samples, output_path, mode="baseline", view="heatmap",
+    fps=1.0, dpi=120, z_exaggeration=2.0,
+):
     import matplotlib
 
     matplotlib.use("Agg")
     from matplotlib import animation
     import matplotlib.pyplot as pyplot
     import numpy
+
+    if z_exaggeration <= 0:
+        raise ValueError("z_exaggeration must be above zero")
 
     frames = prepare_frames(samples, mode)
     if not numpy.isfinite(frames).all():
@@ -92,32 +98,64 @@ def render_gif(samples, output_path, mode="baseline", fps=1.0, dpi=120):
             vmin=minimum - padding, vmax=maximum + padding)
         cmap = "viridis"
 
-    figure, axes = pyplot.subplots(figsize=(9, 7), constrained_layout=True)
-    image = axes.imshow(
-        frames[0], origin="lower", interpolation="bilinear", aspect="auto",
-        extent=extent, cmap=cmap, norm=norm)
-    colorbar = figure.colorbar(image, ax=axes)
+    figure = pyplot.figure(figsize=(9, 7), constrained_layout=True)
+    if view == "heatmap":
+        axes = figure.add_subplot(111)
+        artist = axes.imshow(
+            frames[0], origin="lower", interpolation="bilinear", aspect="auto",
+            extent=extent, cmap=cmap, norm=norm)
+    elif view == "surface":
+        axes = figure.add_subplot(111, projection="3d")
+        if extent is None:
+            x_values = numpy.linspace(0., frames.shape[2] - 1,
+                                      frames.shape[2])
+            y_values = numpy.linspace(0., frames.shape[1] - 1,
+                                      frames.shape[1])
+        else:
+            x_values = numpy.linspace(extent[0], extent[1],
+                                      frames.shape[2])
+            y_values = numpy.linspace(extent[2], extent[3],
+                                      frames.shape[1])
+        x_grid, y_grid = numpy.meshgrid(x_values, y_values)
+        artist = axes.plot_surface(
+            x_grid, y_grid, frames[0], cmap=cmap, norm=norm,
+            linewidth=0., antialiased=True)
+        axes.set_zlim(norm.vmin, norm.vmax)
+        axes.set_zlabel("Z or delta (mm), visual %gx" % z_exaggeration)
+        axes.view_init(elev=30., azim=-60.)
+        axes.set_box_aspect((4., 4., min(z_exaggeration, 16.)))
+    else:
+        raise ValueError("unknown render view: %s" % view)
+    colorbar = figure.colorbar(artist, ax=axes, shrink=.8)
     colorbar.set_label("Z or delta (mm)")
     axes.set_xlabel("X (mm)")
     axes.set_ylabel("Y (mm)")
 
     def update(frame_index):
+        nonlocal artist
         sample = samples[frame_index]
-        image.set_data(frames[frame_index])
+        if view == "heatmap":
+            artist.set_data(frames[frame_index])
+        else:
+            artist.remove()
+            artist = axes.plot_surface(
+                x_grid, y_grid, frames[frame_index], cmap=cmap, norm=norm,
+                linewidth=0., antialiased=True)
         metric = sample.get("metrics") or {}
         maximum_delta = metric.get("max_abs_delta_mm")
         suffix = ""
         if maximum_delta is not None:
             suffix = " | max |delta| %.4f mm" % maximum_delta
         axes.set_title(
-            "Bed expansion - %s | sample %d | %.1f s%s"
+            "Bed expansion - %s %s | sample %d | %.1f s%s"
             % (
+                view,
                 mode,
                 sample.get("sample_index", frame_index),
                 sample.get("elapsed_s", 0.),
                 suffix,
             ))
-        return (image,)
+        return (artist,)
 
     update(0)
     animation_writer = animation.PillowWriter(
@@ -143,24 +181,34 @@ def main():
         default="baseline",
         help="absolute mesh, delta from first sample, or delta from prior sample")
     parser.add_argument(
+        "--view", choices=("heatmap", "surface"), default="heatmap",
+        help="2D heatmap or animated isometric 3D surface")
+    parser.add_argument(
         "--output", help="Output GIF path (default: beside the JSONL file)")
     parser.add_argument(
         "--fps", type=float, default=1.0,
         help="Animation frames per second")
     parser.add_argument("--dpi", type=int, default=120)
+    parser.add_argument(
+        "--z-exaggeration", type=float, default=2.0,
+        help="3D vertical visual scale multiplier (default: 2)")
     args = parser.parse_args()
     if args.fps <= 0:
         parser.error("--fps must be above zero")
     if args.dpi <= 0:
         parser.error("--dpi must be above zero")
+    if args.z_exaggeration <= 0:
+        parser.error("--z-exaggeration must be above zero")
 
     output = args.output
     if output is None:
         base, _ = os.path.splitext(args.run)
-        output = "%s_%s.gif" % (base, args.mode)
+        output = "%s_%s_%s.gif" % (base, args.mode, args.view)
     samples = load_samples(args.run)
     print(render_gif(
-        samples, output, mode=args.mode, fps=args.fps, dpi=args.dpi))
+        samples, output, mode=args.mode, view=args.view,
+        fps=args.fps, dpi=args.dpi,
+        z_exaggeration=args.z_exaggeration))
 
 
 if __name__ == "__main__":

@@ -67,6 +67,27 @@ class BedExpansionRenderTests(unittest.TestCase):
                 self.assertEqual(result.read(6), b"GIF89a")
             self.assertGreater(os.path.getsize(output), 1000)
 
+    def test_render_surface_writes_nonempty_gif(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = os.path.join(directory, "run_surface.gif")
+            rendered = bed_expansion_render.render_gif(
+                self.samples(), output, mode="baseline", view="surface",
+                fps=2., dpi=40, z_exaggeration=3.)
+            self.assertEqual(rendered, output)
+            with open(output, "rb") as result:
+                self.assertEqual(result.read(6), b"GIF89a")
+            self.assertGreater(os.path.getsize(output), 1000)
+
+    def test_render_rejects_nonpositive_z_exaggeration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "z_exaggeration"):
+                bed_expansion_render.render_gif(
+                    self.samples(),
+                    os.path.join(directory, "run.gif"),
+                    view="surface",
+                    z_exaggeration=0.,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

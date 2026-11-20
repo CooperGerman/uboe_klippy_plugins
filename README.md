@@ -209,7 +209,9 @@ control:
 ```shell
 python3 bed_expansion_render.py \
   ~/printer_data/logs/bed_expansion/20261120T112936537358Z_calibrate.jsonl \
-  --mode baseline
+  --mode baseline \
+  --view surface \
+  --z-exaggeration 2
 ```
 
 Install its optional dependencies with:
@@ -219,12 +221,19 @@ python3 -m pip install -r requirements-render.txt
 ```
 
 The output GIF is written beside the run by default. `--output` and `--fps`
-allow overriding its destination and playback speed. Rendering modes are:
+allow overriding its destination and playback speed. `--view heatmap` creates
+the 2D top view; `--view surface` creates an isometric 3D mesh.
+`--z-exaggeration` multiplies the visual vertical scale for surface views and
+defaults to 2; use 1 for the base scale or 3 for stronger deformation.
+Rendering modes are:
 
 - `baseline`: each mesh minus the first mesh, showing thermal deformation
   relative to the starting state.
 - `absolute`: the measured mesh at each sample.
 - `previous`: each mesh minus the immediately preceding mesh.
 
-All animation frames use the same color range. Baseline and previous-change
-animations use a symmetric scale with zero at the center.
+All animation frames use the same color and Z-axis range. Baseline and
+previous-change animations use a symmetric scale with zero at the center. The
+3D camera and aspect ratio remain fixed, while the surface itself updates in
+every frame. The 3D vertical axis is normalized to the fixed data range, so it
+is intentionally exaggerated relative to the bed's X/Y dimensions.
