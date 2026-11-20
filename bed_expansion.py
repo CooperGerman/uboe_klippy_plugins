@@ -78,8 +78,6 @@ class BedExpansion:
             config, "mesh_min", float)
         self.default_mesh_max = self._config_pair(
             config, "mesh_max", float)
-        self.target_tolerance = config.getfloat(
-            "target_tolerance", .5, minval=0.)
         self.park_macro = config.get("park_macro", "PARK").strip()
         self.rehome_z_before_scan = config.getboolean(
             "rehome_z_before_scan", True)
@@ -611,7 +609,7 @@ class BedExpansion:
             target = self.run["target_c"]
             self.gcode.run_script_from_command(
                 "TEMPERATURE_WAIT SENSOR=heater_bed MINIMUM=%.3f"
-                % (target - self.target_tolerance))
+                % target)
             eventtime = self.reactor.monotonic()
             heater_temp, _ = self._bed_heater().get_temp(eventtime)
             self.analysis_started_at = eventtime
@@ -817,9 +815,7 @@ class BedExpansion:
         self._set_phase("heating", self.reactor.monotonic())
         self.gcode.run_script_from_command(
             "TEMPERATURE_WAIT SENSOR=heater_bed MINIMUM=%.3f"
-            % (
-                self.run["target_c"] - self.target_tolerance,
-            ))
+            % self.run["target_c"])
         eventtime = self.reactor.monotonic()
         heater_temp, _ = self._bed_heater().get_temp(eventtime)
         self.analysis_started_at = eventtime

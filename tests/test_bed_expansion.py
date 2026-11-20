@@ -151,7 +151,6 @@ class BedExpansionStateTests(unittest.TestCase):
         plugin.rehome_z_before_scan = False
         plugin.relevel_before_scan = False
         plugin.render_on_finish = False
-        plugin.target_tolerance = .5
         plugin.output_dir = output_dir
         plugin.active = True
         plugin.phase = "scanning"
@@ -317,7 +316,7 @@ class BedExpansionStateTests(unittest.TestCase):
                 "G28 X Y Z",
                 "QUAD_GANTRY_LEVEL",
                 "M140 S85.000",
-                "TEMPERATURE_WAIT SENSOR=heater_bed MINIMUM=84.500",
+                "TEMPERATURE_WAIT SENSOR=heater_bed MINIMUM=85.000",
                 "BED_MESH_CALIBRATE "
                 "PROFILE=__bed_expansion_analysis__",
             ])

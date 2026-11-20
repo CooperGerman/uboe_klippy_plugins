@@ -116,7 +116,6 @@ timeout: 7200
 tolerance: 0.01
 metric: max_abs
 stable_window: 5
-target_tolerance: 0.5
 park_macro: PARK
 rehome_z_before_scan: True
 relevel_before_scan: True
@@ -142,8 +141,8 @@ The plugin:
 
 1. Homes X/Y/Z when necessary.
 2. Runs `QUAD_GANTRY_LEVEL` or `Z_TILT_ADJUST` when either module is present.
-3. Sets the requested bed target and waits until it is within
-   `target_tolerance`.
+3. Sets the requested bed target and lets Klipper's `TEMPERATURE_WAIT` detect
+   when the sensor has reached it.
 4. Clears the active mesh, reruns QGL/Z-tilt when configured, and rehomes Z
    immediately before each scan. Releveling removes accumulating gantry tilt so
    each sample matches the geometry established by a print-start leveling
