@@ -98,14 +98,16 @@ def render_gif(
             vmin=minimum - padding, vmax=maximum + padding)
         cmap = "viridis"
 
-    figure = pyplot.figure(figsize=(9, 7), constrained_layout=True)
+    figure = pyplot.figure(figsize=(9, 8), constrained_layout=True)
+    grid = figure.add_gridspec(
+        2, 1, height_ratios=(8., 1.))
     if view == "heatmap":
-        axes = figure.add_subplot(111)
+        axes = figure.add_subplot(grid[0])
         artist = axes.imshow(
             frames[0], origin="lower", interpolation="bilinear", aspect="auto",
             extent=extent, cmap=cmap, norm=norm)
     elif view == "surface":
-        axes = figure.add_subplot(111, projection="3d")
+        axes = figure.add_subplot(grid[0], projection="3d")
         if extent is None:
             x_values = numpy.linspace(0., frames.shape[2] - 1,
                                       frames.shape[2])
@@ -131,6 +133,27 @@ def render_gif(
     axes.set_xlabel("X (mm)")
     axes.set_ylabel("Y (mm)")
 
+    elapsed_times = numpy.asarray(
+        [float(sample.get("elapsed_s", 0.)) for sample in samples])
+    elapsed_span = float(max(elapsed_times[-1], 1.0))
+    timeline = figure.add_subplot(grid[1])
+    timeline.set_xlim(0., elapsed_span)
+    timeline.set_ylim(0., 1.)
+    timeline.set_yticks([])
+    timeline.set_xlabel("Elapsed heat-soak time (s)")
+    timeline.plot(
+        [0., elapsed_span], [.5, .5],
+        color="#c8c8c8", linewidth=5., solid_capstyle="round")
+    timeline.scatter(
+        elapsed_times, numpy.full(len(samples), .5),
+        color="#707070", s=24, zorder=2)
+    timeline_cursor = timeline.scatter(
+        elapsed_times[0], .5, color="#d62728",
+        s=90, marker="|", linewidths=2.5, zorder=3)
+    timeline_label = timeline.text(
+        0.5, 1.05, "", transform=timeline.transAxes,
+        ha="center", va="bottom", fontsize=9)
+
     def update(frame_index):
         nonlocal artist
         sample = samples[frame_index]
@@ -155,7 +178,17 @@ def render_gif(
                 sample.get("elapsed_s", 0.),
                 suffix,
             ))
-        return (artist,)
+        elapsed = float(sample.get("elapsed_s", 0.))
+        timeline_cursor.set_offsets([[elapsed, .5]])
+        timeline_label.set_text(
+            "Sample %d / %d | %.1f s / %.1f s"
+            % (
+                frame_index + 1,
+                len(samples),
+                elapsed,
+                elapsed_times[-1],
+            ))
+        return (artist, timeline_cursor, timeline_label)
 
     update(0)
     animation_writer = animation.PillowWriter(

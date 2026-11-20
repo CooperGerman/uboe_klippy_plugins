@@ -236,4 +236,6 @@ All animation frames use the same color and Z-axis range. Baseline and
 previous-change animations use a symmetric scale with zero at the center. The
 3D camera and aspect ratio remain fixed, while the surface itself updates in
 every frame. The 3D vertical axis is normalized to the fixed data range, so it
-is intentionally exaggerated relative to the bed's X/Y dimensions.
+is intentionally exaggerated relative to the bed's X/Y dimensions. A timeline
+below the plot marks every captured sample and advances the active sample
+indicator with its elapsed heat-soak time.

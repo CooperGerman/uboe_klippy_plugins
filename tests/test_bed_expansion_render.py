@@ -78,6 +78,15 @@ class BedExpansionRenderTests(unittest.TestCase):
                 self.assertEqual(result.read(6), b"GIF89a")
             self.assertGreater(os.path.getsize(output), 1000)
 
+    def test_render_timeline_handles_multiple_samples(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = os.path.join(directory, "run_timeline.gif")
+            rendered = bed_expansion_render.render_gif(
+                self.samples(), output, mode="previous",
+                fps=2., dpi=40)
+            self.assertTrue(os.path.isfile(rendered))
+            self.assertGreater(os.path.getsize(output), 1000)
+
     def test_render_rejects_nonpositive_z_exaggeration(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "z_exaggeration"):
