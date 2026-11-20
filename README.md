@@ -116,21 +116,32 @@ tolerance: 0.01
 metric: max_abs
 stable_window: 5
 target_tolerance: 0.5
-heat_timeout: 7200
 park_macro: PARK
-poll_interval: 0.5
+rehome_z_before_scan: True
+# Optional bed-mesh overrides. Omit these to use [bed_mesh] defaults.
+mesh_command: BED_MESH_CALIBRATE
+# mesh_speed: 100
+# mesh_probe_count: 20,20
+# mesh_min: 20,20
+# mesh_max: 570,580
 ```
 
 All command time values are seconds and all mesh-delta values are millimetres.
+The analyzer does not poll Klipper state. Homing, leveling, temperature
+waiting, and bed-mesh commands use Klipper's blocking, reactor-aware command
+flow; the only analyzer timer wake is the next scan deadline.
 The analyzer:
 
 1. Homes X/Y/Z when necessary.
 2. Runs `QUAD_GANTRY_LEVEL` or `Z_TILT_ADJUST` when either module is present.
 3. Sets the requested bed target and waits until it is within
    `target_tolerance`.
-4. Captures a bed mesh immediately, then repeats at the configured interval.
-5. Runs `park_macro` after each capture.
-6. Turns the bed heater off when the run completes, stabilizes, times out, or
+4. Clears the active mesh and rehomes Z immediately before each scan.
+5. Captures a bed mesh immediately, then waits the configured interval after
+   that mesh completes before starting the next scan. A slow mesh therefore
+   never causes scans to overlap or bunch together.
+6. Runs `park_macro` after each capture.
+7. Turns the bed heater off when the run completes, stabilizes, times out, or
    fails.
 
 Capture a fixed-duration series:
@@ -144,6 +155,22 @@ Find a stable heat-soak time:
 ```gcode
 BED_EXPANSION_CALIBRATE TARGET=85 INTERVAL=120 TIMEOUT=7200 TOLERANCE=0.01 METRIC=max_abs STABLE_WINDOW=5
 ```
+
+Mesh settings can be overridden for either command. Global `mesh_*` options
+in `[bed_expansion_analyzer]` provide defaults for every run; command
+parameters override them for one run. If no value is supplied, Klipper's
+configured `[bed_mesh]` defaults remain in effect:
+
+```gcode
+BED_EXPANSION_CALIBRATE TARGET=85 SPEED=80 PROBE_COUNT=12,12 MESH_MIN=30,30 MESH_MAX=550,550
+```
+
+The `mesh_command` config option accepts a G-code command with fixed arguments,
+for example `mesh_command: BED_MESH_CALIBRATE METHOD=rapid`.
+The `MESH_COMMAND` command parameter can override the command name for one
+run. `SPEED` controls
+normal bed-mesh point travel and is also sent as `SCAN_SPEED` for rapid-scan
+commands.
 
 For `METRIC=max_abs`, a comparison is stable only when every absolute
 point-to-point Z delta is at or below `TOLERANCE`. The supported metrics are
@@ -173,3 +200,31 @@ BED_EXPANSION_LOAD RUN=20260101T120000000000Z_calibrate.jsonl SAMPLE=12 PROFILE=
 ```
 
 Use `BED_EXPANSION_STATUS` to inspect an active or most recently completed run.
+
+## Rendering a bed expansion GIF
+
+Rendering runs separately from Klipper so image generation cannot block printer
+control:
+
+```shell
+python3 bed_expansion_render.py \
+  ~/printer_data/logs/bed_expansion/20261120T112936537358Z_calibrate.jsonl \
+  --mode baseline
+```
+
+Install its optional dependencies with:
+
+```shell
+python3 -m pip install -r requirements-render.txt
+```
+
+The output GIF is written beside the run by default. `--output` and `--fps`
+allow overriding its destination and playback speed. Rendering modes are:
+
+- `baseline`: each mesh minus the first mesh, showing thermal deformation
+  relative to the starting state.
+- `absolute`: the measured mesh at each sample.
+- `previous`: each mesh minus the immediately preceding mesh.
+
+All animation frames use the same color range. Baseline and previous-change
+animations use a symmetric scale with zero at the center.
