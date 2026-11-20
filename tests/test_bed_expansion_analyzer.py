@@ -28,6 +28,10 @@ class FakeReactor:
 
     def __init__(self):
         self.updated_timer = None
+        self.current_time = 0.
+
+    def monotonic(self):
+        return self.current_time
 
     def update_timer(self, timer, wake_time):
         self.updated_timer = (timer, wake_time)
@@ -81,6 +85,14 @@ class LoadCommand:
         self.messages.append(message)
 
 
+class MeshCommand(LoadCommand):
+    def get_float(self, name, default=None, above=None):
+        value = float(self.parameters[name]) if name in self.parameters else default
+        if above is not None and value is not None and value <= above:
+            raise ValueError(name)
+        return value
+
+
 class BedExpansionMathTests(unittest.TestCase):
     def test_mesh_delta_preserves_per_point_values(self):
         previous = [[0., .1], [.2, .3]]
@@ -121,9 +133,8 @@ class BedExpansionStateTests(unittest.TestCase):
         plugin.gcode = FakeGcode()
         plugin.reactor = FakeReactor()
         plugin.timer = object()
-        plugin.poll_interval = .5
         plugin.park_macro = "PARK"
-        plugin.heat_timeout = 100.
+        plugin.rehome_z_before_scan = False
         plugin.target_tolerance = .5
         plugin.output_dir = output_dir
         plugin.active = True
@@ -195,25 +206,168 @@ class BedExpansionStateTests(unittest.TestCase):
             self.assertEqual(plugin.stable_count, 0)
             self.assertEqual(plugin.phase, "interval")
 
-    def test_home_without_leveler_starts_heating(self):
+    def test_preparation_uses_synchronous_klipper_commands(self):
         with tempfile.TemporaryDirectory() as output_dir:
             plugin = self.make_plugin(output_dir)
             plugin.active = True
             plugin.phase = "home"
-            plugin.home_started = False
-            plugin.level_object = None
             toolhead = SimpleNamespace(
-                get_status=lambda eventtime: {"homed_axes": "xyz"})
+                get_status=lambda eventtime: {"homed_axes": ""})
+            bed_mesh = SimpleNamespace(
+                bmc=SimpleNamespace(probe_mgr=SimpleNamespace(speed=100.)),
+                get_mesh=lambda: FakeZMesh([[0., 0.], [0., 0.]]))
+            heater = SimpleNamespace(get_temp=lambda eventtime: (85., 85.))
+            heaters = SimpleNamespace(lookup_heater=lambda name: heater)
             plugin.printer = SimpleNamespace(
                 lookup_object=lambda name, default=None: (
-                    toolhead if name == "toolhead" else default
+                    toolhead if name == "toolhead"
+                    else bed_mesh if name == "bed_mesh"
+                    else heaters if name == "heaters"
+                    else default
                 ))
+            plugin.run.update({
+                "mesh_command": "BED_MESH_CALIBRATE",
+                "speed": None,
+                "probe_count": None,
+                "mesh_min": None,
+                "mesh_max": None,
+            })
+            plugin._find_leveler = lambda: (
+                SimpleNamespace(), "QUAD_GANTRY_LEVEL")
+            plugin._bed_heater = lambda: heater
+            plugin.previous_mesh = None
+            plugin.stable_count = 0
 
             wake_time = plugin._timer_step(1.)
 
-            self.assertEqual(wake_time, FakeReactor.NOW)
-            self.assertEqual(plugin.phase, "heating")
-            self.assertIn("M140 S85.000", plugin.gcode.scripts)
+            self.assertEqual(wake_time, 120.)
+            self.assertEqual(plugin.phase, "interval")
+            self.assertEqual(plugin.gcode.scripts[:5], [
+                "G28 X Y Z",
+                "QUAD_GANTRY_LEVEL",
+                "M140 S85.000",
+                "TEMPERATURE_WAIT SENSOR=heater_bed MINIMUM=84.500",
+                "BED_MESH_CALIBRATE "
+                "PROFILE=__bed_expansion_analysis__",
+            ])
+
+    def test_mesh_parameters_override_defaults(self):
+        plugin = self.make_plugin(".")
+        plugin.mesh_command = "BED_MESH_CALIBRATE"
+        plugin.default_mesh_speed = 75.
+        plugin.default_probe_count = (20, 20)
+        plugin.default_mesh_min = (10., 10.)
+        plugin.default_mesh_max = (200., 200.)
+
+        parameters = plugin._mesh_parameters(MeshCommand(
+            SPEED="40",
+            PROBE_COUNT="8,10",
+            MESH_MIN="20,25",
+            MESH_MAX="180,190",
+            MESH_COMMAND="MY_BED_MESH",
+        ))
+
+        self.assertEqual(parameters, {
+            "mesh_command": "MY_BED_MESH",
+            "speed": 40.,
+            "probe_count": (8, 10),
+            "mesh_min": (20., 25.),
+            "mesh_max": (180., 190.),
+        })
+
+    def test_mesh_scan_uses_overrides_without_retaining_speed(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            plugin = self.make_plugin(output_dir)
+            plugin.run.update({
+                "mesh_command": "BED_MESH_CALIBRATE METHOD=rapid",
+                "speed": 60.,
+                "probe_count": (10, 12),
+                "mesh_min": (20., 25.),
+                "mesh_max": (500., 550.),
+            })
+            observed_speeds = []
+
+            class ProbeManager:
+                speed = 100.
+
+            probe_manager = ProbeManager()
+            bed_mesh = SimpleNamespace(
+                bmc=SimpleNamespace(probe_mgr=probe_manager),
+                get_mesh=lambda: FakeZMesh([[0., 0.], [0., 0.]]))
+            plugin.printer = SimpleNamespace(
+                lookup_object=lambda name: bed_mesh)
+            plugin.gcode.run_script_from_command = (
+                lambda script: (
+                    observed_speeds.append((script, probe_manager.speed)),
+                    setattr(plugin.reactor, "current_time", 55.),
+                ))
+
+            plugin._start_mesh_scan(10.)
+
+            self.assertEqual(probe_manager.speed, 100.)
+            self.assertEqual(observed_speeds, [(
+                "BED_MESH_CALIBRATE METHOD=rapid "
+                "PROFILE=__bed_expansion_analysis__ "
+                "SCAN_SPEED=60.0 PROBE_COUNT=10,12 "
+                "MESH_MIN=20.0,25.0 MESH_MAX=500.0,550.0",
+                60.,
+            )])
+            self.assertEqual(plugin.next_scan_at, 175.)
+
+    def test_mesh_scan_without_overrides_uses_configured_command_only(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            plugin = self.make_plugin(output_dir)
+            plugin.run.update({
+                "mesh_command": "BED_MESH_CALIBRATE",
+                "speed": None,
+                "probe_count": None,
+                "mesh_min": None,
+                "mesh_max": None,
+            })
+            bed_mesh = SimpleNamespace(
+                bmc=SimpleNamespace(probe_mgr=SimpleNamespace(speed=100.)),
+                get_mesh=lambda: FakeZMesh([[0., 0.], [0., 0.]]))
+            plugin.printer = SimpleNamespace(
+                lookup_object=lambda name: bed_mesh)
+
+            plugin._start_mesh_scan(10.)
+
+            self.assertEqual(
+                plugin.gcode.scripts[:1],
+                ["BED_MESH_CALIBRATE PROFILE=__bed_expansion_analysis__"],
+            )
+
+    def test_mesh_scan_rehomes_z_immediately_before_scanning(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            plugin = self.make_plugin(output_dir)
+            plugin.run.update({
+                "mesh_command": "BED_MESH_CALIBRATE",
+                "speed": None,
+                "probe_count": None,
+                "mesh_min": None,
+                "mesh_max": None,
+            })
+            plugin.rehome_z_before_scan = True
+            plugin.reactor.current_time = 10.
+            bed_mesh = SimpleNamespace(
+                bmc=SimpleNamespace(probe_mgr=SimpleNamespace(speed=100.)),
+                get_mesh=lambda: FakeZMesh([[0., 0.], [0., 0.]]))
+            plugin.printer = SimpleNamespace(
+                lookup_object=lambda name: bed_mesh)
+
+            plugin._start_mesh_scan(10.)
+
+            self.assertEqual(
+                plugin.gcode.scripts[:3],
+                [
+                    "BED_MESH_CLEAR",
+                    "G28 Z",
+                    "BED_MESH_CALIBRATE "
+                    "PROFILE=__bed_expansion_analysis__",
+                ],
+            )
+            self.assertEqual(plugin.phase, "stable")
+            self.assertEqual(plugin.active, False)
 
     def test_load_restores_saved_sample_and_optional_profile(self):
         with tempfile.TemporaryDirectory() as output_dir:
