@@ -263,15 +263,16 @@ class BedExpansionAnalyzer:
             command.append("%s=%s" % (option, value))
 
         probe_manager = getattr(bed_mesh.bmc, "probe_mgr", None)
+        probe_helper = getattr(probe_manager, "probe_helper", None)
         previous_speed = None
-        if probe_manager is not None and self.run["speed"] is not None:
-            previous_speed = probe_manager.speed
-            probe_manager.speed = self.run["speed"]
+        if probe_helper is not None and self.run["speed"] is not None:
+            previous_speed = probe_helper.speed
+            probe_helper.speed = self.run["speed"]
         try:
             self.gcode.run_script_from_command(" ".join(command))
         finally:
             if previous_speed is not None:
-                probe_manager.speed = previous_speed
+                probe_helper.speed = previous_speed
         completed_at = self.reactor.monotonic()
         self.next_scan_at = completed_at + self.run["interval_s"]
         self._set_phase("scanning", completed_at)
@@ -373,6 +374,7 @@ class BedExpansionAnalyzer:
     def _finish_run(self, eventtime, result, error=None):
         if not self.active:
             return
+        eventtime = self.reactor.monotonic()
         self.active = False
         self.reactor.update_timer(self.timer, self.reactor.NEVER)
         try:
@@ -417,7 +419,7 @@ class BedExpansionAnalyzer:
             return self._timer_step(eventtime)
         except Exception as error:
             logging.exception("bed_expansion_analyzer: run failed")
-            self._finish_run(eventtime, "failed", str(error))
+            self._finish_run(self.reactor.monotonic(), "failed", str(error))
             return self.reactor.NEVER
 
     def _timer_step(self, eventtime):
