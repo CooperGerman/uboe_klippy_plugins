@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-import bed_expansion_analyzer
+import bed_expansion
 
 
 class FakeGcode:
@@ -99,19 +99,19 @@ class MeshCommand(LoadCommand):
 
 class BedExpansionMathTests(unittest.TestCase):
     def test_heatsoak_profiles_must_be_temperature_keyed_json_object(self):
-        profiles = bed_expansion_analyzer.BedExpansionAnalyzer \
+        profiles = bed_expansion.BedExpansion \
             ._load_heatsoak_profiles(
                 '{"85":{"heatsoak_time_s":1200}}', ValueError)
         self.assertEqual(profiles["85"]["heatsoak_time_s"], 1200)
         with self.assertRaisesRegex(ValueError, "keys"):
-            bed_expansion_analyzer.BedExpansionAnalyzer \
+            bed_expansion.BedExpansion \
                 ._load_heatsoak_profiles(
                     '{"hot":{"heatsoak_time_s":1200}}', ValueError)
 
     def test_mesh_delta_preserves_per_point_values(self):
         previous = [[0., .1], [.2, .3]]
         current = [[.02, .09], [.25, .27]]
-        delta = bed_expansion_analyzer.mesh_delta(previous, current)
+        delta = bed_expansion.mesh_delta(previous, current)
         self.assertEqual(delta, [
             [.02, -.010000000000000009],
             [.04999999999999999, -.02999999999999997],
@@ -119,12 +119,12 @@ class BedExpansionMathTests(unittest.TestCase):
 
     def test_mesh_delta_rejects_shape_changes(self):
         with self.assertRaisesRegex(ValueError, "row counts"):
-            bed_expansion_analyzer.mesh_delta([[0.]], [[0.], [0.]])
+            bed_expansion.mesh_delta([[0.]], [[0.], [0.]])
         with self.assertRaisesRegex(ValueError, "column counts"):
-            bed_expansion_analyzer.mesh_delta([[0.]], [[0., 1.]])
+            bed_expansion.mesh_delta([[0.]], [[0., 1.]])
 
     def test_delta_metrics_include_population_stdev_rms_and_max(self):
-        metrics = bed_expansion_analyzer.delta_metrics([
+        metrics = bed_expansion.delta_metrics([
             [.01, -.01],
             [.02, -.02],
         ])
@@ -142,8 +142,8 @@ class BedExpansionMathTests(unittest.TestCase):
 
 class BedExpansionStateTests(unittest.TestCase):
     def make_plugin(self, output_dir):
-        plugin = bed_expansion_analyzer.BedExpansionAnalyzer.__new__(
-            bed_expansion_analyzer.BedExpansionAnalyzer)
+        plugin = bed_expansion.BedExpansion.__new__(
+            bed_expansion.BedExpansion)
         plugin.gcode = FakeGcode()
         plugin.reactor = FakeReactor()
         plugin.timer = object()
@@ -176,7 +176,7 @@ class BedExpansionStateTests(unittest.TestCase):
         plugin.phase_started_at = 10.
         plugin.next_scan_at = 130.
         plugin.last_error = None
-        plugin.config_name = "bed_expansion_analyzer"
+        plugin.config_name = "bed_expansion"
         plugin.heatsoak_profiles = {}
         plugin.config_saves = []
         plugin.configfile = SimpleNamespace(
@@ -213,7 +213,7 @@ class BedExpansionStateTests(unittest.TestCase):
             self.assertIn("M140 S0.000", plugin.gcode.scripts)
             self.assertEqual(
                 plugin.config_saves[0][:2],
-                ("bed_expansion_analyzer", "heatsoak_profiles"),
+                ("bed_expansion", "heatsoak_profiles"),
             )
             profile = plugin.heatsoak_profiles["85"]
             self.assertEqual(profile["stable_window"], 2)
@@ -270,7 +270,7 @@ class BedExpansionStateTests(unittest.TestCase):
 
     def test_printer_data_root_matches_config_file_parent(self):
         self.assertEqual(
-            bed_expansion_analyzer.BedExpansionAnalyzer._printer_data_dir({
+            bed_expansion.BedExpansion._printer_data_dir({
                 "config_file": "/home/user/printer_data/config/printer.cfg",
             }),
             "/home/user/printer_data",
@@ -321,6 +321,25 @@ class BedExpansionStateTests(unittest.TestCase):
                 "BED_MESH_CALIBRATE "
                 "PROFILE=__bed_expansion_analysis__",
             ])
+
+    def test_wait_timeout_action_error_finishes_failed_without_heater_off(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            plugin = self.make_plugin(output_dir)
+            plugin.active = True
+            plugin.run.update({
+                "keep_heater_on": True,
+                "save_profile": False,
+            })
+            plugin.run_file = os.path.join(output_dir, "wait.jsonl")
+            plugin.reactor.current_time = 610.
+            plugin.analysis_started_at = 10.
+
+            plugin._finish_run(610., "failed", "Bed did not stabilize")
+
+            self.assertNotIn("M140 S0.000", plugin.gcode.scripts)
+            with open(plugin.run_file) as result_file:
+                records = [json.loads(line) for line in result_file]
+            self.assertEqual(records[-1]["result"], "failed")
 
     def test_mesh_parameters_override_defaults(self):
         plugin = self.make_plugin(".")
@@ -513,8 +532,8 @@ class BedExpansionStateTests(unittest.TestCase):
                 pass
 
             bed_mesh = FakeBedMesh()
-            plugin = bed_expansion_analyzer.BedExpansionAnalyzer.__new__(
-                bed_expansion_analyzer.BedExpansionAnalyzer)
+            plugin = bed_expansion.BedExpansion.__new__(
+                bed_expansion.BedExpansion)
             plugin.output_dir = output_dir
             plugin.printer = SimpleNamespace(
                 lookup_object=lambda name: bed_mesh)
@@ -524,7 +543,7 @@ class BedExpansionStateTests(unittest.TestCase):
                 ZMesh=FakeZMesh, BedMeshError=FakeBedMeshError)
 
             with mock.patch.object(
-                bed_expansion_analyzer.importlib,
+                bed_expansion.importlib,
                 "import_module",
                 return_value=fake_module,
             ):

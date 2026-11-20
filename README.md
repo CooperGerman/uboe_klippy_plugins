@@ -50,9 +50,10 @@ The table below lists the plugins and their functionality.
 | | `CONTINUE_SURFACE_TEMP_PROFILE` command | This command will continue a surface temperature profile for the active surface by setting the bed temperature from 40 to max bed temp stepping 5 and saving the temperature profile to the active surface starting with latest measured temperature entry + 5. |
 | | `SET_HEATER_TEMPERATURE_COMPENSATE` command |         This command will try to apply an offset to the heater target temp if the the heater is in the list of heaters with a temp_profile. |
 |  |  |  |
-| bed_expansion_analyzer |  | Records bed meshes over time and can determine the heat-soak time at which successive meshes become stable. |
+| bed_expansion |  | Records bed meshes over time, determines heat-soak stability, and waits for a stable bed during print start. |
 | | `BED_EXPANSION_ANALYZE` | Captures meshes for a fixed duration at a requested bed target. |
 | | `BED_EXPANSION_CALIBRATE` | Captures meshes until the configured stability window is reached or the timeout expires. |
+| | `BED_EXPANSION_WAIT` | Blocks print-start until the bed mesh is stable or the timeout policy is applied. |
 | | `BED_EXPANSION_LOAD` | Loads a captured sample into the live Klipper bed mesh for visualization in Mainsail. |
 | | `BED_EXPANSION_STATUS` | Reports run state, sample count, latest deltas, and output file. |
 |  |  |  |
@@ -104,10 +105,10 @@ mechanical limits. Neither acceleration nor speed limits are changed.
 
 ## Bed expansion analysis
 
-Add the analyzer after the `[bed_mesh]` section in the printer configuration:
+Add the plugin after the `[bed_mesh]` section in the printer configuration:
 
 ```ini
-[bed_expansion_analyzer]
+[bed_expansion]
 output_dir: ~/printer_data/logs/bed_expansion
 interval: 120
 duration: 1800
@@ -134,10 +135,10 @@ mesh_command: BED_MESH_CALIBRATE
 ```
 
 All command time values are seconds and all mesh-delta values are millimetres.
-The analyzer does not poll Klipper state. Homing, leveling, temperature
+The plugin does not poll Klipper state. Homing, leveling, temperature
 waiting, and bed-mesh commands use Klipper's blocking, reactor-aware command
-flow; the only analyzer timer wake is the next scan deadline.
-The analyzer:
+flow; the only plugin timer wake is the next scan deadline.
+The plugin:
 
 1. Homes X/Y/Z when necessary.
 2. Runs `QUAD_GANTRY_LEVEL` or `Z_TILT_ADJUST` when either module is present.
@@ -162,7 +163,7 @@ derived from Klipper's startup `config_file` path. Set `render_on_finish: False`
 to disable automatic output.
 
 When `BED_EXPANSION_CALIBRATE` reaches stability, the analyzer also stages a
-`heatsoak_profiles` autosave value under `[bed_expansion_analyzer]`. Run
+`heatsoak_profiles` autosave value under `[bed_expansion]`. Run
 `SAVE_CONFIG` after calibration to persist it. Each temperature key contains
 the target, conservative heat-soak completion time, inferred start of the
 stable window, tolerance, metric, interval, window size, sample count, and
@@ -170,14 +171,14 @@ source run:
 
 ```ini
 # Written by SAVE_CONFIG
-#*# [bed_expansion_analyzer]
+#*# [bed_expansion]
 #*# heatsoak_profiles = {"85":{"heatsoak_time_s":1200.0,...}}
 ```
 
 Macros can read it directly:
 
 ```jinja
-{% set profiles = printer.bed_expansion_analyzer.heatsoak_profiles %}
+{% set profiles = printer.bed_expansion.heatsoak_profiles %}
 {% set ns = namespace(profile={}) %}
 {% for temperature, profile in profiles.items() %}
   {% if temperature|float == params.BED_TEMP|float %}
@@ -203,8 +204,20 @@ Find a stable heat-soak time:
 BED_EXPANSION_CALIBRATE TARGET=85 INTERVAL=120 TIMEOUT=7200 TOLERANCE=0.01 METRIC=max_abs STABLE_WINDOW=5
 ```
 
+Wait for a thermally stable bed directly during print start:
+
+```gcode
+BED_EXPANSION_WAIT TARGET={bed_temp} INTERVAL=120 TIMEOUT=7200 TOLERANCE=0.01 METRIC=stdev STABLE_WINDOW=5 ON_TIMEOUT=error
+```
+
+`BED_EXPANSION_WAIT` keeps the bed heater at the target and blocks the
+remaining macro until stability is reached. `ON_TIMEOUT=error` is the safe
+default and aborts the pending print-start command; `ON_TIMEOUT=warn` keeps the
+heater hot and continues. Print-time runs update `printer` status but do not
+stage an autosave profile.
+
 Mesh settings can be overridden for either command. Global `mesh_*` options
-in `[bed_expansion_analyzer]` provide defaults for every run; command
+in `[bed_expansion]` provide defaults for every run; command
 parameters override them for one run. If no value is supplied, Klipper's
 configured `[bed_mesh]` defaults remain in effect:
 

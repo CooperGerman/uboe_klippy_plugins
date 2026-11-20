@@ -42,7 +42,7 @@ def delta_metrics(delta):
     }
 
 
-class BedExpansionAnalyzer:
+class BedExpansion:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
@@ -136,6 +136,9 @@ class BedExpansionAnalyzer:
             "BED_EXPANSION_CALIBRATE", self.cmd_BED_EXPANSION_CALIBRATE,
             desc=self.cmd_BED_EXPANSION_CALIBRATE_help)
         self.gcode.register_command(
+            "BED_EXPANSION_WAIT", self.cmd_BED_EXPANSION_WAIT,
+            desc=self.cmd_BED_EXPANSION_WAIT_help)
+        self.gcode.register_command(
             "BED_EXPANSION_STATUS", self.cmd_BED_EXPANSION_STATUS,
             desc=self.cmd_BED_EXPANSION_STATUS_help)
         self.gcode.register_command(
@@ -210,7 +213,7 @@ class BedExpansionAnalyzer:
     def _set_phase(self, phase, eventtime):
         self.phase = phase
         self.phase_started_at = eventtime
-        logging.info("bed_expansion_analyzer: phase %s", phase)
+        logging.info("bed_expansion: phase %s", phase)
 
     def _is_homed(self, eventtime):
         toolhead = self.printer.lookup_object("toolhead")
@@ -265,7 +268,7 @@ class BedExpansionAnalyzer:
             "run": dict(self.run),
         })
 
-    def _start_run(self, gcmd, mode, parameters):
+    def _initialize_run(self, gcmd, mode, parameters):
         if self.active:
             raise gcmd.error(
                 "A bed expansion analysis is already active")
@@ -289,6 +292,10 @@ class BedExpansionAnalyzer:
             self.run_file = None
             raise gcmd.error(
                 "Unable to create bed expansion run file: %s" % error)
+        return eventtime
+
+    def _start_run(self, gcmd, mode, parameters):
+        eventtime = self._initialize_run(gcmd, mode, parameters)
         self._set_phase("home", eventtime)
         self.reactor.update_timer(self.timer, self.reactor.NOW)
         gcmd.respond_info(
@@ -444,11 +451,12 @@ class BedExpansionAnalyzer:
         eventtime = self.reactor.monotonic()
         self.active = False
         self.reactor.update_timer(self.timer, self.reactor.NEVER)
-        try:
-            self._set_bed_target(0.)
-        except Exception:
-            logging.exception(
-                "bed_expansion_analyzer: unable to turn off bed heater")
+        if not self.run.get("keep_heater_on"):
+            try:
+                self._set_bed_target(0.)
+            except Exception:
+                logging.exception(
+                    "bed_expansion: unable to turn off bed heater")
         record = {
             "type": "result",
             "run_id": self.run["run_id"],
@@ -467,14 +475,14 @@ class BedExpansionAnalyzer:
             self._append_record(record)
         except Exception:
             logging.exception(
-                "bed_expansion_analyzer: unable to write terminal result")
+                "bed_expansion: unable to write terminal result")
         self.last_error = error
         self._set_phase(result, eventtime)
         if error is None:
             self.gcode.respond_info(
                 "Bed expansion analysis %s after %d samples; output: %s"
                 % (result, self.sample_count, self.run_file))
-            if result == "stable":
+            if result == "stable" and self.run.get("save_profile", True):
                 self._save_heatsoak_profile(eventtime)
         else:
             self.gcode.respond_info(
@@ -527,7 +535,7 @@ class BedExpansionAnalyzer:
             self._show_rendered_file(output_file)
         except Exception as error:
             logging.exception(
-                "bed_expansion_analyzer: unable to render completed run")
+                "bed_expansion: unable to render completed run")
             self.gcode.respond_info(
                 "Bed expansion GIF rendering failed: %s" % error)
 
@@ -584,7 +592,7 @@ class BedExpansionAnalyzer:
         try:
             return self._timer_step(eventtime)
         except Exception as error:
-            logging.exception("bed_expansion_analyzer: run failed")
+            logging.exception("bed_expansion: run failed")
             self._finish_run(self.reactor.monotonic(), "failed", str(error))
             return self.reactor.NEVER
 
@@ -644,7 +652,8 @@ class BedExpansionAnalyzer:
                 else self.next_scan_at
             )
 
-        raise self.gcode.error("Unknown analyzer phase: %s" % self.phase)
+        raise self.gcode.error("Unknown bed expansion phase: %s"
+                               % self.phase)
 
     def _handle_shutdown(self):
         if not self.active:
@@ -723,6 +732,107 @@ class BedExpansionAnalyzer:
             **mesh_parameters,
         })
 
+    cmd_BED_EXPANSION_WAIT_help = (
+        "Block until the hot bed mesh remains stable or the timeout expires")
+
+    def cmd_BED_EXPANSION_WAIT(self, gcmd):
+        target = gcmd.get_float("TARGET", above=0.)
+        interval = gcmd.get_float(
+            "INTERVAL", self.default_interval, above=0.)
+        timeout = gcmd.get_float(
+            "TIMEOUT", self.default_timeout, above=0.)
+        tolerance = gcmd.get_float(
+            "TOLERANCE", self.default_tolerance, minval=0.)
+        metric = self._parse_metric(
+            gcmd.get("METRIC", self.default_metric), gcmd.error)
+        stable_window = gcmd.get_int(
+            "STABLE_WINDOW", self.default_stable_window, minval=1)
+        timeout_action = gcmd.get(
+            "ON_TIMEOUT", "error").strip().lower()
+        if timeout_action not in ("error", "warn"):
+            raise gcmd.error("ON_TIMEOUT must be error or warn")
+        parameters = {
+            "target_c": target,
+            "interval_s": interval,
+            "timeout_s": timeout,
+            "tolerance_mm": tolerance,
+            "metric": metric,
+            "stable_window": stable_window,
+            "keep_heater_on": True,
+            "save_profile": False,
+            **self._mesh_parameters(gcmd),
+        }
+        eventtime = self._initialize_run(gcmd, "wait", parameters)
+        gcmd.respond_info(
+            "Waiting for bed expansion stability; output: %s"
+            % self.run_file)
+        try:
+            self._prepare_synchronous_run(eventtime)
+            deadline = self.analysis_started_at + timeout
+            while not self.printer.is_shutdown():
+                self._start_mesh_scan(self.reactor.monotonic())
+                eventtime = self.reactor.monotonic()
+                if self.stable_count >= stable_window:
+                    self._finish_run(eventtime, "stable")
+                    gcmd.respond_info(
+                        "Bed is stable after %.1f seconds at %.1f C"
+                        % (
+                            eventtime - self.analysis_started_at,
+                            target,
+                        ))
+                    return
+                if eventtime >= deadline:
+                    message = (
+                        "Bed did not stabilize within %.1f seconds"
+                        % timeout)
+                    if timeout_action == "error":
+                        self._finish_run(eventtime, "failed", message)
+                        raise gcmd.error(message)
+                    self._finish_run(eventtime, "timeout")
+                    gcmd.respond_info(
+                        "Continuing after bed expansion timeout: %s"
+                        % message)
+                    return
+                next_wake = min(self.next_scan_at, deadline)
+                self.reactor.pause(next_wake)
+        except gcmd.error:
+            raise
+        except Exception as error:
+            self._finish_run(
+                self.reactor.monotonic(), "failed", str(error))
+            raise gcmd.error(
+                "Bed expansion wait failed: %s" % error)
+        finally:
+            self.reactor.update_timer(self.timer, self.reactor.NEVER)
+
+    def _prepare_synchronous_run(self, eventtime):
+        if not self._is_homed(eventtime):
+            self._set_phase("home", eventtime)
+            self.gcode.run_script_from_command("G28 X Y Z")
+        _, level_command = self._find_leveler()
+        if level_command is not None:
+            self._set_phase("level", self.reactor.monotonic())
+            self.gcode.run_script_from_command(level_command)
+        self._set_bed_target(self.run["target_c"])
+        self._set_phase("heating", self.reactor.monotonic())
+        self.gcode.run_script_from_command(
+            "TEMPERATURE_WAIT SENSOR=heater_bed MINIMUM=%.3f"
+            % (
+                self.run["target_c"] - self.target_tolerance,
+            ))
+        eventtime = self.reactor.monotonic()
+        heater_temp, _ = self._bed_heater().get_temp(eventtime)
+        self.analysis_started_at = eventtime
+        self._append_record({
+            "type": "target_reached",
+            "run_id": self.run["run_id"],
+            "target_c": self.run["target_c"],
+            "measured_c": heater_temp,
+            "reached_at": self._utc_now(),
+            "elapsed_from_start_s": (
+                eventtime - self.run["created_monotonic"]),
+        })
+
     def _mesh_parameters(self, gcmd):
         speed = gcmd.get_float("SPEED", self.default_mesh_speed, above=0.)
         mesh_command = gcmd.get(
@@ -779,7 +889,8 @@ class BedExpansionAnalyzer:
         path = os.path.realpath(os.path.join(self.output_dir, filename))
         output_dir = os.path.realpath(self.output_dir)
         if os.path.commonpath((output_dir, path)) != output_dir:
-            raise gcmd.error("RUN must reference the analyzer output directory")
+            raise gcmd.error(
+                "RUN must reference the bed expansion output directory")
         if not os.path.isfile(path):
             raise gcmd.error("Bed expansion run not found: %s" % filename)
 
@@ -837,4 +948,4 @@ class BedExpansionAnalyzer:
 
 
 def load_config(config):
-    return BedExpansionAnalyzer(config)
+    return BedExpansion(config)

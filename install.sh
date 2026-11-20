@@ -27,6 +27,9 @@ mkdir -p "${KLIPPY_DIR}/extras"
 
 echo "Linking .py files from ${SCRIPT_DIR} to ${KLIPPY_DIR}/extras"
 
+# Remove plugin symlinks renamed by the bed_expansion cleanup.
+rm -f "${KLIPPY_DIR}/extras/bed_expansion_analyzer.py"
+
 # Find and symlink all .py files in the script directory (not subdirectories)
 for f in "${SCRIPT_DIR}"/*.py ; do
 	if [ -f "$f" ]; then
