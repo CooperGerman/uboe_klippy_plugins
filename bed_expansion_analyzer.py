@@ -61,13 +61,24 @@ class BedExpansionAnalyzer:
             config.get("metric", "max_abs"), config.error)
         self.default_stable_window = config.getint(
             "stable_window", 5, minval=1)
+        self.mesh_command = config.get(
+            "mesh_command", "BED_MESH_CALIBRATE").strip()
+        if not self.mesh_command or "\n" in self.mesh_command:
+            raise config.error(
+                "mesh_command must be a single non-empty G-code command")
+        self.default_mesh_speed = config.getfloat(
+            "mesh_speed", None, above=0.)
+        self.default_probe_count = self._config_pair(
+            config, "mesh_probe_count", int, 3)
+        self.default_mesh_min = self._config_pair(
+            config, "mesh_min", float)
+        self.default_mesh_max = self._config_pair(
+            config, "mesh_max", float)
         self.target_tolerance = config.getfloat(
             "target_tolerance", .5, minval=0.)
-        self.heat_timeout = config.getfloat(
-            "heat_timeout", 7200., above=0.)
-        self.poll_interval = config.getfloat(
-            "poll_interval", .5, above=0.)
         self.park_macro = config.get("park_macro", "PARK").strip()
+        self.rehome_z_before_scan = config.getboolean(
+            "rehome_z_before_scan", True)
 
         self.timer = self.reactor.register_timer(
             self._timer_callback, self.reactor.NEVER)
@@ -83,10 +94,6 @@ class BedExpansionAnalyzer:
         self.analysis_started_at = None
         self.phase_started_at = None
         self.next_scan_at = None
-        self.level_object = None
-        self.level_command = None
-        self.level_started = False
-        self.home_started = False
 
         self.printer.register_event_handler(
             "klippy:shutdown", self._handle_shutdown)
@@ -118,6 +125,24 @@ class BedExpansionAnalyzer:
                 "BED_EXPANSION metric must be one of: %s"
                 % ", ".join(VALID_METRICS))
         return normalized
+
+    @staticmethod
+    def _config_pair(config, option, parser, minval=None):
+        value = config.get(option, None)
+        if value is None:
+            return None
+        try:
+            pair = [parser(item.strip()) for item in value.split(",")]
+        except (TypeError, ValueError):
+            raise config.error("%s must contain one or two values" % option)
+        if len(pair) == 1:
+            pair *= 2
+        if len(pair) != 2:
+            raise config.error("%s must contain one or two values" % option)
+        if minval is not None and any(item < minval for item in pair):
+            raise config.error(
+                "%s values must be at least %s" % (option, minval))
+        return tuple(pair)
 
     @staticmethod
     def _utc_now():
@@ -196,10 +221,6 @@ class BedExpansionAnalyzer:
         self.stable_count = 0
         self.analysis_started_at = None
         self.next_scan_at = None
-        self.level_object = None
-        self.level_command = None
-        self.level_started = False
-        self.home_started = False
         try:
             self._create_run_file(mode, parameters, eventtime)
         except Exception as error:
@@ -215,13 +236,46 @@ class BedExpansionAnalyzer:
             % (mode, self.run_file))
 
     def _start_mesh_scan(self, eventtime):
+        if self.rehome_z_before_scan:
+            self.gcode.run_script_from_command("BED_MESH_CLEAR")
+            self.gcode.run_script_from_command("G28 Z")
+        self._perform_mesh_scan()
+
+    def _perform_mesh_scan(self):
         bed_mesh = self.printer.lookup_object("bed_mesh")
-        self.next_scan_at = eventtime + self.run["interval_s"]
-        self.gcode.run_script_from_command(
-            "BED_MESH_CALIBRATE PROFILE=__bed_expansion_analysis__")
-        calibrate = bed_mesh.bmc
-        calibrate._profile_name = None
-        self._set_phase("scanning", eventtime)
+        command = [self.run["mesh_command"]]
+        if "PROFILE=" not in self.run["mesh_command"].upper():
+            command.append("PROFILE=__bed_expansion_analysis__")
+        mesh_options = (
+            ("speed", "SCAN_SPEED"),
+            ("probe_count", "PROBE_COUNT"),
+            ("mesh_min", "MESH_MIN"),
+            ("mesh_max", "MESH_MAX"),
+        )
+        for key, option in mesh_options:
+            values = self.run[key]
+            if values is None:
+                continue
+            if isinstance(values, tuple):
+                value = ",".join(str(item) for item in values)
+            else:
+                value = str(values)
+            command.append("%s=%s" % (option, value))
+
+        probe_manager = getattr(bed_mesh.bmc, "probe_mgr", None)
+        previous_speed = None
+        if probe_manager is not None and self.run["speed"] is not None:
+            previous_speed = probe_manager.speed
+            probe_manager.speed = self.run["speed"]
+        try:
+            self.gcode.run_script_from_command(" ".join(command))
+        finally:
+            if previous_speed is not None:
+                probe_manager.speed = previous_speed
+        completed_at = self.reactor.monotonic()
+        self.next_scan_at = completed_at + self.run["interval_s"]
+        self._set_phase("scanning", completed_at)
+        self._capture_mesh(completed_at)
 
     def _capture_mesh(self, eventtime):
         bed_mesh = self.printer.lookup_object("bed_mesh")
@@ -307,9 +361,6 @@ class BedExpansionAnalyzer:
             self._finish_run(eventtime, result)
             return True
         self._set_phase("interval", eventtime)
-        self.reactor.update_timer(
-            self.timer, max(eventtime + self.poll_interval,
-                            self.next_scan_at))
         return True
 
     def _metric_key(self):
@@ -371,39 +422,22 @@ class BedExpansionAnalyzer:
 
     def _timer_step(self, eventtime):
         if self.phase == "home":
-            if self._is_homed(eventtime):
-                self.level_object, self.level_command = self._find_leveler()
-                if self.level_object is not None:
-                    self._set_phase("level", eventtime)
-                else:
-                    self._set_bed_target(self.run["target_c"])
-                    self._set_phase("heating", eventtime)
-                return self.reactor.NOW
-            if not self.home_started:
-                self.home_started = True
+            if not self._is_homed(eventtime):
                 self.gcode.run_script_from_command("G28 X Y Z")
-            return eventtime + self.poll_interval
 
-        if self.phase == "level":
-            if not self.level_started:
-                self.level_started = True
-                self.gcode.run_script_from_command(self.level_command)
-                return eventtime + self.poll_interval
-            if not self.level_object.get_status(eventtime).get("applied"):
-                return eventtime + self.poll_interval
+            _, level_command = self._find_leveler()
+            if level_command is not None:
+                self._set_phase("level", eventtime)
+                self.gcode.run_script_from_command(level_command)
+
             self._set_bed_target(self.run["target_c"])
             self._set_phase("heating", eventtime)
-            return eventtime + self.poll_interval
-
-        if self.phase == "heating":
-            heater_temp, _ = self._bed_heater().get_temp(eventtime)
             target = self.run["target_c"]
-            if heater_temp < target - self.target_tolerance:
-                if eventtime - self.phase_started_at >= self.heat_timeout:
-                    raise self.gcode.error(
-                        "bed did not reach %.1f C within %.0f seconds"
-                        % (target, self.heat_timeout))
-                return eventtime + self.poll_interval
+            self.gcode.run_script_from_command(
+                "TEMPERATURE_WAIT SENSOR=heater_bed MINIMUM=%.3f"
+                % (target - self.target_tolerance))
+            eventtime = self.reactor.monotonic()
+            heater_temp, _ = self._bed_heater().get_temp(eventtime)
             self.analysis_started_at = eventtime
             self._append_record({
                 "type": "target_reached",
@@ -415,12 +449,11 @@ class BedExpansionAnalyzer:
                     eventtime - self.run["created_monotonic"]),
             })
             self._start_mesh_scan(eventtime)
-            return eventtime + self.poll_interval
-
-        if self.phase == "scanning":
-            self._capture_mesh(eventtime)
-            return self.reactor.NEVER if not self.active else (
-                eventtime + self.poll_interval)
+            return (
+                self.reactor.NEVER
+                if not self.active
+                else self.next_scan_at
+            )
 
         if self.phase == "interval":
             limit = (
@@ -437,7 +470,11 @@ class BedExpansionAnalyzer:
             if eventtime < self.next_scan_at:
                 return self.next_scan_at
             self._start_mesh_scan(eventtime)
-            return eventtime + self.poll_interval
+            return (
+                self.reactor.NEVER
+                if not self.active
+                else self.next_scan_at
+            )
 
         raise self.gcode.error("Unknown analyzer phase: %s" % self.phase)
 
@@ -478,6 +515,7 @@ class BedExpansionAnalyzer:
             "DURATION", self.default_duration, above=0.)
         metric = self._parse_metric(
             gcmd.get("METRIC", self.default_metric), gcmd.error)
+        mesh_parameters = self._mesh_parameters(gcmd)
         self._start_run(gcmd, "analyze", {
             "target_c": target,
             "interval_s": interval,
@@ -487,6 +525,7 @@ class BedExpansionAnalyzer:
                 "TOLERANCE", self.default_tolerance, minval=0.),
             "stable_window": gcmd.get_int(
                 "STABLE_WINDOW", self.default_stable_window, minval=1),
+            **mesh_parameters,
         })
 
     cmd_BED_EXPANSION_CALIBRATE_help = (
@@ -504,6 +543,7 @@ class BedExpansionAnalyzer:
             gcmd.get("METRIC", self.default_metric), gcmd.error)
         stable_window = gcmd.get_int(
             "STABLE_WINDOW", self.default_stable_window, minval=1)
+        mesh_parameters = self._mesh_parameters(gcmd)
         self._start_run(gcmd, "calibrate", {
             "target_c": target,
             "interval_s": interval,
@@ -511,7 +551,44 @@ class BedExpansionAnalyzer:
             "tolerance_mm": tolerance,
             "metric": metric,
             "stable_window": stable_window,
+            **mesh_parameters,
         })
+
+    def _mesh_parameters(self, gcmd):
+        speed = gcmd.get_float("SPEED", self.default_mesh_speed, above=0.)
+        mesh_command = gcmd.get(
+            "MESH_COMMAND", self.mesh_command).strip()
+        if not mesh_command or "\n" in mesh_command:
+            raise gcmd.error(
+                "MESH_COMMAND must be a single non-empty G-code command")
+        return {
+            "mesh_command": mesh_command,
+            "speed": speed,
+            "probe_count": self._gcmd_pair(
+                gcmd, "PROBE_COUNT", self.default_probe_count, int, 3),
+            "mesh_min": self._gcmd_pair(
+                gcmd, "MESH_MIN", self.default_mesh_min, float),
+            "mesh_max": self._gcmd_pair(
+                gcmd, "MESH_MAX", self.default_mesh_max, float),
+        }
+
+    @staticmethod
+    def _gcmd_pair(gcmd, option, default, parser, minval=None):
+        value = gcmd.get(option, None)
+        if value is None:
+            return default
+        try:
+            pair = [parser(item.strip()) for item in value.split(",")]
+        except (TypeError, ValueError):
+            raise gcmd.error("%s must contain one or two values" % option)
+        if len(pair) == 1:
+            pair *= 2
+        if len(pair) != 2:
+            raise gcmd.error("%s must contain one or two values" % option)
+        if minval is not None and any(item < minval for item in pair):
+            raise gcmd.error(
+                "%s values must be at least %s" % (option, minval))
+        return tuple(pair)
 
     cmd_BED_EXPANSION_STATUS_help = (
         "Report the current bed expansion analysis state")
