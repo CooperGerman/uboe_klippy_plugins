@@ -124,7 +124,6 @@ render_view: surface
 render_fps: 1
 render_dpi: 120
 render_z_exaggeration: 2
-printer_data_dir: ~/printer_data
 # Optional bed-mesh overrides. Omit these to use [bed_mesh] defaults.
 mesh_command: BED_MESH_CALIBRATE
 # mesh_speed: 100
@@ -154,7 +153,8 @@ The analyzer:
 Successful runs with at least two samples are rendered automatically. Rendering
 uses Klipper's threaded `aio_executor`, so Matplotlib and Pillow do not run in
 the printer's main thread. The GIF is saved beside the JSONL file and displayed
-in the web console through Moonraker's file server. Set `render_on_finish: False`
+in the web console through Moonraker's file server. The printer-data root is
+derived from Klipper's startup `config_file` path. Set `render_on_finish: False`
 to disable automatic output.
 
 When `BED_EXPANSION_CALIBRATE` reaches stability, the analyzer also stages a

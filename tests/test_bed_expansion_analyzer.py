@@ -267,6 +267,14 @@ class BedExpansionStateTests(unittest.TestCase):
                 "../server/files/logs/bed_expansion/run.gif", message)
             self.assertIn("<img", message)
 
+    def test_printer_data_root_matches_config_file_parent(self):
+        self.assertEqual(
+            bed_expansion_analyzer.BedExpansionAnalyzer._printer_data_dir({
+                "config_file": "/home/user/printer_data/config/printer.cfg",
+            }),
+            "/home/user/printer_data",
+        )
+
     def test_preparation_uses_synchronous_klipper_commands(self):
         with tempfile.TemporaryDirectory() as output_dir:
             plugin = self.make_plugin(output_dir)

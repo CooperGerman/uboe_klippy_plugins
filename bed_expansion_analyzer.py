@@ -83,8 +83,8 @@ class BedExpansionAnalyzer:
         self.park_macro = config.get("park_macro", "PARK").strip()
         self.rehome_z_before_scan = config.getboolean(
             "rehome_z_before_scan", True)
-        self.printer_data_dir = os.path.abspath(os.path.expanduser(
-            config.get("printer_data_dir", "~/printer_data")))
+        self.printer_data_dir = self._printer_data_dir(
+            self.printer.get_start_args())
         self.render_on_finish = config.getboolean(
             "render_on_finish", True)
         self.render_mode = config.get(
@@ -155,6 +155,13 @@ class BedExpansionAnalyzer:
                 "BED_EXPANSION metric must be one of: %s"
                 % ", ".join(VALID_METRICS))
         return normalized
+
+    @staticmethod
+    def _printer_data_dir(start_args):
+        config_file = start_args.get("config_file", "")
+        if not config_file:
+            return ""
+        return os.path.dirname(os.path.dirname(os.path.abspath(config_file)))
 
     @staticmethod
     def _load_heatsoak_profiles(value, error):
