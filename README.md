@@ -50,6 +50,12 @@ The table below lists the plugins and their functionality.
 | | `CONTINUE_SURFACE_TEMP_PROFILE` command | This command will continue a surface temperature profile for the active surface by setting the bed temperature from 40 to max bed temp stepping 5 and saving the temperature profile to the active surface starting with latest measured temperature entry + 5. |
 | | `SET_HEATER_TEMPERATURE_COMPENSATE` command |         This command will try to apply an offset to the heater target temp if the the heater is in the list of heaters with a temp_profile. |
 |  |  |  |
+| bed_expansion_analyzer |  | Records bed meshes over time and can determine the heat-soak time at which successive meshes become stable. |
+| | `BED_EXPANSION_ANALYZE` | Captures meshes for a fixed duration at a requested bed target. |
+| | `BED_EXPANSION_CALIBRATE` | Captures meshes until the configured stability window is reached or the timeout expires. |
+| | `BED_EXPANSION_LOAD` | Loads a captured sample into the live Klipper bed mesh for visualization in Mainsail. |
+| | `BED_EXPANSION_STATUS` | Reports run state, sample count, latest deltas, and output file. |
+|  |  |  |
 | toolhead_bed_temp_sensor |  | This plugin can be instantiated using `[toolhead_bed_temp_sensor]` in your printer config files. It models a toolhead attached temperature sensor that can be x and y offset and can be used for the bed temperature profiling. |
 |  |  |  |
 | stepper_brake |  | This plugin can be instantiated using `[stepper_brake <name>]` in your printer config files. It drives an electromagnetic stepper brake via a GPIO pin and keeps it synchronised with the stepper driver enable state. See [docs/stepper_brake.md](docs/stepper_brake.md) for detailed documentation. |
@@ -95,3 +101,75 @@ apply them; `SAVE_CONFIG` is not used. If a run fails or is interrupted, use
 
 The reported acceleration values estimate input-shaper smoothing, not safe
 mechanical limits. Neither acceleration nor speed limits are changed.
+
+## Bed expansion analysis
+
+Add the analyzer after the `[bed_mesh]` section in the printer configuration:
+
+```ini
+[bed_expansion_analyzer]
+output_dir: ~/printer_data/logs/bed_expansion
+interval: 120
+duration: 1800
+timeout: 7200
+tolerance: 0.01
+metric: max_abs
+stable_window: 5
+target_tolerance: 0.5
+heat_timeout: 7200
+park_macro: PARK
+poll_interval: 0.5
+```
+
+All command time values are seconds and all mesh-delta values are millimetres.
+The analyzer:
+
+1. Homes X/Y/Z when necessary.
+2. Runs `QUAD_GANTRY_LEVEL` or `Z_TILT_ADJUST` when either module is present.
+3. Sets the requested bed target and waits until it is within
+   `target_tolerance`.
+4. Captures a bed mesh immediately, then repeats at the configured interval.
+5. Runs `park_macro` after each capture.
+6. Turns the bed heater off when the run completes, stabilizes, times out, or
+   fails.
+
+Capture a fixed-duration series:
+
+```gcode
+BED_EXPANSION_ANALYZE TARGET=85 INTERVAL=120 DURATION=1800
+```
+
+Find a stable heat-soak time:
+
+```gcode
+BED_EXPANSION_CALIBRATE TARGET=85 INTERVAL=120 TIMEOUT=7200 TOLERANCE=0.01 METRIC=max_abs STABLE_WINDOW=5
+```
+
+For `METRIC=max_abs`, a comparison is stable only when every absolute
+point-to-point Z delta is at or below `TOLERANCE`. The supported metrics are
+`max_abs`, `stdev`, and `rms`. The run stops after the configured number of
+consecutive stable comparisons. This window prevents one quiet interval from
+ending the analysis early.
+
+Each run is written as one timestamped JSONL file under `output_dir`. Every
+sample contains the raw probed matrix, interpolated mesh matrix, mesh
+parameters, raw point-to-point delta matrix, mean delta, maximum absolute
+delta, population standard deviation, and RMS delta. The final record records
+`completed`, `stable`, `timeout`, `failed`, or `interrupted`.
+
+Load a zero-based sample index into Klipper's live mesh:
+
+```gcode
+BED_EXPANSION_LOAD RUN=20260101T120000000000Z_calibrate.jsonl SAMPLE=12
+```
+
+Mainsail can then display the loaded mesh as the current bed mesh. To also
+keep it in Klipper's profile list for the current session, provide `PROFILE`.
+Use `SAVE_CONFIG` afterward only if that profile should be written
+permanently:
+
+```gcode
+BED_EXPANSION_LOAD RUN=20260101T120000000000Z_calibrate.jsonl SAMPLE=12 PROFILE=heatsoak_85c
+```
+
+Use `BED_EXPANSION_STATUS` to inspect an active or most recently completed run.
