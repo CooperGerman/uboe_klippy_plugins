@@ -14,12 +14,16 @@ class FakeGcode:
     def __init__(self):
         self.messages = []
         self.scripts = []
+        self.raw_messages = []
 
     def respond_info(self, message):
         self.messages.append(message)
 
     def run_script_from_command(self, script):
         self.scripts.append(script)
+
+    def respond_raw(self, message):
+        self.raw_messages.append(message)
 
 
 class FakeReactor:
@@ -94,6 +98,16 @@ class MeshCommand(LoadCommand):
 
 
 class BedExpansionMathTests(unittest.TestCase):
+    def test_heatsoak_profiles_must_be_temperature_keyed_json_object(self):
+        profiles = bed_expansion_analyzer.BedExpansionAnalyzer \
+            ._load_heatsoak_profiles(
+                '{"85":{"heatsoak_time_s":1200}}', ValueError)
+        self.assertEqual(profiles["85"]["heatsoak_time_s"], 1200)
+        with self.assertRaisesRegex(ValueError, "keys"):
+            bed_expansion_analyzer.BedExpansionAnalyzer \
+                ._load_heatsoak_profiles(
+                    '{"hot":{"heatsoak_time_s":1200}}', ValueError)
+
     def test_mesh_delta_preserves_per_point_values(self):
         previous = [[0., .1], [.2, .3]]
         current = [[.02, .09], [.25, .27]]
@@ -135,6 +149,7 @@ class BedExpansionStateTests(unittest.TestCase):
         plugin.timer = object()
         plugin.park_macro = "PARK"
         plugin.rehome_z_before_scan = False
+        plugin.render_on_finish = False
         plugin.target_tolerance = .5
         plugin.output_dir = output_dir
         plugin.active = True
@@ -155,10 +170,17 @@ class BedExpansionStateTests(unittest.TestCase):
         plugin.latest_metrics = None
         plugin.sample_count = 1
         plugin.stable_count = 1
+        plugin.sample_elapsed_times = [10.]
         plugin.analysis_started_at = 10.
         plugin.phase_started_at = 10.
         plugin.next_scan_at = 130.
         plugin.last_error = None
+        plugin.config_name = "bed_expansion_analyzer"
+        plugin.heatsoak_profiles = {}
+        plugin.config_saves = []
+        plugin.configfile = SimpleNamespace(
+            set=lambda section, option, value: plugin.config_saves.append(
+                (section, option, value)))
         plugin._park = lambda: plugin.gcode.scripts.append("PARK")
         plugin._set_bed_target = lambda target: (
             plugin.gcode.scripts.append("M140 S%.3f" % target))
@@ -188,6 +210,13 @@ class BedExpansionStateTests(unittest.TestCase):
             self.assertEqual(records[-1]["result"], "stable")
             self.assertIn("PARK", plugin.gcode.scripts)
             self.assertIn("M140 S0.000", plugin.gcode.scripts)
+            self.assertEqual(
+                plugin.config_saves[0][:2],
+                ("bed_expansion_analyzer", "heatsoak_profiles"),
+            )
+            profile = plugin.heatsoak_profiles["85"]
+            self.assertEqual(profile["stable_window"], 2)
+            self.assertEqual(profile["stable_window_started_s"], 10.0)
 
     def test_first_unstable_comparison_resets_stable_window(self):
         with tempfile.TemporaryDirectory() as output_dir:
@@ -218,6 +247,25 @@ class BedExpansionStateTests(unittest.TestCase):
             with open(plugin.run_file) as result_file:
                 records = [json.loads(line) for line in result_file]
             self.assertEqual(records[-1]["elapsed_s"], 210.)
+
+    def test_render_completed_run_displays_console_image(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            plugin = self.make_plugin(output_dir)
+            plugin.render_mode = "baseline"
+            plugin.render_view = "surface"
+            plugin.printer_data_dir = "/home/uboe/printer_data"
+            output_file = (
+                "/home/uboe/printer_data/logs/bed_expansion/run.gif")
+            plugin.render_executor = SimpleNamespace(
+                submit=lambda function, run_file: output_file)
+
+            plugin._render_finished_run()
+
+            self.assertEqual(len(plugin.gcode.raw_messages), 1)
+            message = plugin.gcode.raw_messages[0]
+            self.assertIn(
+                "../server/files/logs/bed_expansion/run.gif", message)
+            self.assertIn("<img", message)
 
     def test_preparation_uses_synchronous_klipper_commands(self):
         with tempfile.TemporaryDirectory() as output_dir:

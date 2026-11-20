@@ -118,6 +118,13 @@ stable_window: 5
 target_tolerance: 0.5
 park_macro: PARK
 rehome_z_before_scan: True
+render_on_finish: True
+render_mode: baseline
+render_view: surface
+render_fps: 1
+render_dpi: 120
+render_z_exaggeration: 2
+printer_data_dir: ~/printer_data
 # Optional bed-mesh overrides. Omit these to use [bed_mesh] defaults.
 mesh_command: BED_MESH_CALIBRATE
 # mesh_speed: 100
@@ -143,6 +150,42 @@ The analyzer:
 6. Runs `park_macro` after each capture.
 7. Turns the bed heater off when the run completes, stabilizes, times out, or
    fails.
+
+Successful runs with at least two samples are rendered automatically. Rendering
+uses Klipper's threaded `aio_executor`, so Matplotlib and Pillow do not run in
+the printer's main thread. The GIF is saved beside the JSONL file and displayed
+in the web console through Moonraker's file server. Set `render_on_finish: False`
+to disable automatic output.
+
+When `BED_EXPANSION_CALIBRATE` reaches stability, the analyzer also stages a
+`heatsoak_profiles` autosave value under `[bed_expansion_analyzer]`. Run
+`SAVE_CONFIG` after calibration to persist it. Each temperature key contains
+the target, conservative heat-soak completion time, inferred start of the
+stable window, tolerance, metric, interval, window size, sample count, and
+source run:
+
+```ini
+# Written by SAVE_CONFIG
+#*# [bed_expansion_analyzer]
+#*# heatsoak_profiles = {"85":{"heatsoak_time_s":1200.0,...}}
+```
+
+Macros can read it directly:
+
+```jinja
+{% set profiles = printer.bed_expansion_analyzer.heatsoak_profiles %}
+{% set ns = namespace(profile={}) %}
+{% for temperature, profile in profiles.items() %}
+  {% if temperature|float == params.BED_TEMP|float %}
+    {% set ns.profile = profile %}
+  {% endif %}
+{% endfor %}
+```
+
+Use `heatsoak_time_s` for conservative heat-soak timing. It is measured from
+the bed reaching the target through the final sample that proves the entire
+stable window. `stable_window_started_s` is the earlier estimate at which the
+first of the consecutive stable comparisons began.
 
 Capture a fixed-duration series:
 

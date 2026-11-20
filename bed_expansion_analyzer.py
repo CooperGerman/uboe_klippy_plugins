@@ -1,9 +1,11 @@
 import datetime
+import html
 import importlib
 import json
 import logging
 import math
 import os
+from urllib.parse import quote
 
 
 VALID_METRICS = ("max_abs", "stdev", "rms")
@@ -45,6 +47,8 @@ class BedExpansionAnalyzer:
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
         self.gcode = self.printer.lookup_object("gcode")
+        self.config_name = config.get_name()
+        self.configfile = self.printer.lookup_object("configfile")
 
         self.output_dir = os.path.abspath(os.path.expanduser(
             config.get("output_dir",
@@ -79,6 +83,31 @@ class BedExpansionAnalyzer:
         self.park_macro = config.get("park_macro", "PARK").strip()
         self.rehome_z_before_scan = config.getboolean(
             "rehome_z_before_scan", True)
+        self.printer_data_dir = os.path.abspath(os.path.expanduser(
+            config.get("printer_data_dir", "~/printer_data")))
+        self.render_on_finish = config.getboolean(
+            "render_on_finish", True)
+        self.render_mode = config.get(
+            "render_mode", "baseline").strip().lower()
+        self.render_view = config.get(
+            "render_view", "surface").strip().lower()
+        if self.render_mode not in ("absolute", "baseline", "previous"):
+            raise config.error(
+                "render_mode must be absolute, baseline, or previous")
+        if self.render_view not in ("heatmap", "surface"):
+            raise config.error("render_view must be heatmap or surface")
+        self.render_fps = config.getfloat(
+            "render_fps", 1., above=0.)
+        self.render_dpi = config.getint(
+            "render_dpi", 120, minval=20)
+        self.render_z_exaggeration = config.getfloat(
+            "render_z_exaggeration", 2., above=0.)
+        self.heatsoak_profiles = self._load_heatsoak_profiles(
+            config.get("heatsoak_profiles", "{}"), config.error)
+        aio_dispatcher = self.printer.load_object(
+            config, "aio_executor")
+        self.render_executor = aio_dispatcher.allocate_executor(
+            "bed-exp-render")
 
         self.timer = self.reactor.register_timer(
             self._timer_callback, self.reactor.NEVER)
@@ -90,6 +119,7 @@ class BedExpansionAnalyzer:
         self.latest_metrics = None
         self.sample_count = 0
         self.stable_count = 0
+        self.sample_elapsed_times = []
         self.last_error = None
         self.analysis_started_at = None
         self.phase_started_at = None
@@ -125,6 +155,26 @@ class BedExpansionAnalyzer:
                 "BED_EXPANSION metric must be one of: %s"
                 % ", ".join(VALID_METRICS))
         return normalized
+
+    @staticmethod
+    def _load_heatsoak_profiles(value, error):
+        try:
+            profiles = json.loads(value)
+        except (TypeError, ValueError) as exc:
+            raise error("heatsoak_profiles must be valid JSON: %s" % exc)
+        if not isinstance(profiles, dict):
+            raise error("heatsoak_profiles must be a JSON object")
+        for temperature, profile in profiles.items():
+            try:
+                float(temperature)
+            except (TypeError, ValueError):
+                raise error(
+                    "heatsoak_profiles keys must be temperatures")
+            if not isinstance(profile, dict):
+                raise error(
+                    "heatsoak profile %s must be a JSON object"
+                    % temperature)
+        return profiles
 
     @staticmethod
     def _config_pair(config, option, parser, minval=None):
@@ -219,6 +269,7 @@ class BedExpansionAnalyzer:
         self.latest_metrics = None
         self.sample_count = 0
         self.stable_count = 0
+        self.sample_elapsed_times = []
         self.analysis_started_at = None
         self.next_scan_at = None
         try:
@@ -327,6 +378,8 @@ class BedExpansionAnalyzer:
         }
         self._append_record(record)
         self.sample_count += 1
+        self.sample_elapsed_times.append(
+            eventtime - self.analysis_started_at)
         self.previous_mesh = probed_matrix
         self.latest_metrics = metrics
         self.gcode.respond_info(
@@ -407,10 +460,109 @@ class BedExpansionAnalyzer:
             self.gcode.respond_info(
                 "Bed expansion analysis %s after %d samples; output: %s"
                 % (result, self.sample_count, self.run_file))
+            if result == "stable":
+                self._save_heatsoak_profile(eventtime)
         else:
             self.gcode.respond_info(
                 "Bed expansion analysis failed: %s; partial output: %s"
                 % (error, self.run_file))
+        if error is None and self.render_on_finish:
+            if self.sample_count < 2:
+                self.gcode.respond_info(
+                    "Bed expansion GIF not rendered: at least two samples "
+                    "are required")
+            else:
+                self._render_finished_run()
+
+    def _save_heatsoak_profile(self, eventtime):
+        heatsoak_time = eventtime - self.analysis_started_at
+        stable_window_started = self.sample_elapsed_times[
+            -self.run["stable_window"]]
+        temperature = "%.3f" % self.run["target_c"]
+        temperature = temperature.rstrip("0").rstrip(".")
+        profile = {
+            "heatsoak_time_s": round(heatsoak_time, 3),
+            "stable_window_started_s": round(stable_window_started, 3),
+            "target_c": self.run["target_c"],
+            "tolerance_mm": self.run["tolerance_mm"],
+            "metric": self.run["metric"],
+            "interval_s": self.run["interval_s"],
+            "stable_window": self.run["stable_window"],
+            "stable_comparisons": self.stable_count,
+            "sample_count": self.sample_count,
+            "calibrated_at": self._utc_now(),
+            "run_id": self.run["run_id"],
+            "run_file": self.run_file,
+        }
+        profiles = dict(self.heatsoak_profiles)
+        profiles[temperature] = profile
+        serialized = json.dumps(
+            profiles, sort_keys=True, separators=(",", ":"))
+        self.configfile.set(
+            self.config_name, "heatsoak_profiles", serialized)
+        self.heatsoak_profiles = profiles
+        self.gcode.respond_info(
+            "Heat-soak profile for %.3f C recorded as %.1f s. "
+            "Run SAVE_CONFIG to persist it."
+            % (self.run["target_c"], heatsoak_time))
+
+    def _render_finished_run(self):
+        try:
+            output_file = self.render_executor.submit(
+                self._render_run_file, self.run_file)
+            self._show_rendered_file(output_file)
+        except Exception as error:
+            logging.exception(
+                "bed_expansion_analyzer: unable to render completed run")
+            self.gcode.respond_info(
+                "Bed expansion GIF rendering failed: %s" % error)
+
+    def _render_run_file(self, run_file):
+        module_name = (
+            "%s.bed_expansion_render" % __name__.rsplit(".", 1)[0]
+            if "." in __name__
+            else "bed_expansion_render"
+        )
+        renderer = importlib.import_module(module_name)
+        base, _ = os.path.splitext(run_file)
+        output_file = "%s_%s_%s.gif" % (
+            base, self.render_mode, self.render_view)
+        samples = renderer.load_samples(run_file)
+        return renderer.render_gif(
+            samples,
+            output_file,
+            mode=self.render_mode,
+            view=self.render_view,
+            fps=self.render_fps,
+            dpi=self.render_dpi,
+            z_exaggeration=self.render_z_exaggeration,
+        )
+
+    def _show_rendered_file(self, output_file):
+        output_file = os.path.realpath(output_file)
+        printer_data_dir = os.path.realpath(self.printer_data_dir)
+        try:
+            within_printer_data = (
+                os.path.commonpath((printer_data_dir, output_file))
+                == printer_data_dir
+            )
+        except ValueError:
+            within_printer_data = False
+        if not within_printer_data:
+            self.gcode.respond_info(
+                "Bed expansion GIF: %s" % output_file)
+            return
+        relative_path = os.path.relpath(output_file, printer_data_dir)
+        url = "../server/files/%s" % quote(
+            relative_path.replace(os.sep, "/"), safe="/")
+        name = html.escape(os.path.basename(output_file))
+        self.gcode.respond_raw(
+            '<p style="font-weight:bold;margin:0;color:white">'
+            'Bed expansion animation: %s</p>'
+            'Click image to download or right-click for options.'
+            '<a href="%s" target="_blank"><img src="%s" '
+            'alt="%s" width="100%%"></a>'
+            % (name, url, url, name))
 
     def _timer_callback(self, eventtime):
         if not self.active:
@@ -502,6 +654,7 @@ class BedExpansionAnalyzer:
             "sample_count": self.sample_count,
             "stable_window_count": self.stable_count,
             "latest_metrics": self.latest_metrics,
+            "heatsoak_profiles": self.heatsoak_profiles,
             "elapsed_s": elapsed,
             "last_error": self.last_error,
         }
