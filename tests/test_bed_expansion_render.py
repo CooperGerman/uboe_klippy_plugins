@@ -14,6 +14,8 @@ class BedExpansionRenderTests(unittest.TestCase):
                 "sample_index": 0,
                 "elapsed_s": 0.,
                 "probed_matrix": [[0., .1], [.2, .3]],
+                "mesh_matrix": [[0., .05, .1], [.1, .15, .2],
+                                [.2, .25, .3]],
                 "delta_from_previous": None,
                 "metrics": None,
                 "mesh_params": {
@@ -26,6 +28,8 @@ class BedExpansionRenderTests(unittest.TestCase):
                 "sample_index": 1,
                 "elapsed_s": 120.,
                 "probed_matrix": [[.02, .08], [.25, .28]],
+                "mesh_matrix": [[.02, .04, .08], [.135, .16, .17],
+                                [.25, .265, .28]],
                 "delta_from_previous": [[.02, -.02], [.05, -.02]],
                 "metrics": {"max_abs_delta_mm": .05},
                 "mesh_params": {
@@ -53,9 +57,21 @@ class BedExpansionRenderTests(unittest.TestCase):
             samples, "absolute")
 
         self.assertAlmostEqual(float(baseline[1, 0, 0]), .02)
-        self.assertAlmostEqual(float(previous[1, 1, 0]), .05)
-        self.assertAlmostEqual(float(absolute[0, 1, 1]), .3)
+        self.assertAlmostEqual(float(previous[1, 1, 0]), .035)
+        self.assertAlmostEqual(float(absolute[0, 1, 1]), .15)
         self.assertAlmostEqual(float(previous[0, 0, 0]), 0.)
+
+    def test_prepare_frames_defaults_to_interpolated_mesh(self):
+        frames = bed_expansion_render.prepare_frames(
+            self.samples(), "absolute")
+        self.assertEqual(frames.shape, (2, 3, 3))
+        self.assertAlmostEqual(float(frames[0, 1, 1]), .15)
+
+    def test_prepare_frames_supports_raw_probed_data(self):
+        frames = bed_expansion_render.prepare_frames(
+            self.samples(), "previous", "probed")
+        self.assertEqual(frames.shape, (2, 2, 2))
+        self.assertAlmostEqual(float(frames[1, 1, 0]), .05)
 
     def test_render_writes_nonempty_gif(self):
         with tempfile.TemporaryDirectory() as directory:

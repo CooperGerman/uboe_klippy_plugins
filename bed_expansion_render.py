@@ -24,16 +24,35 @@ def load_samples(path):
     return samples
 
 
-def prepare_frames(samples, mode):
+def prepare_frames(samples, mode, data_source="mesh"):
     import numpy
 
-    baseline = numpy.asarray(samples[0]["probed_matrix"], dtype=float)
+    if data_source == "mesh":
+        matrix_key = "mesh_matrix"
+    elif data_source == "probed":
+        matrix_key = "probed_matrix"
+    else:
+        raise ValueError("unknown data source: %s" % data_source)
+
+    def get_matrix(sample):
+        matrix = sample.get(matrix_key)
+        if matrix is None and data_source == "mesh":
+            matrix = sample.get("probed_matrix")
+        if matrix is None:
+            raise ValueError(
+                "sample %s has no %s matrix"
+                % (sample.get("sample_index"), data_source))
+        return numpy.asarray(matrix, dtype=float)
+
+    baseline = get_matrix(samples[0])
     if baseline.ndim != 2 or not baseline.size:
-        raise ValueError("first sample contains an invalid probed matrix")
+        raise ValueError("first sample contains an invalid %s matrix"
+                         % data_source)
 
     frames = []
+    previous = None
     for sample in samples:
-        matrix = numpy.asarray(sample["probed_matrix"], dtype=float)
+        matrix = get_matrix(sample)
         if matrix.shape != baseline.shape:
             raise ValueError(
                 "sample %s has a different mesh shape"
@@ -43,24 +62,29 @@ def prepare_frames(samples, mode):
         elif mode == "baseline":
             frame = matrix - baseline
         elif mode == "previous":
-            delta = sample.get("delta_from_previous")
-            if delta is None:
-                frame = numpy.zeros_like(matrix)
-            else:
-                frame = numpy.asarray(delta, dtype=float)
-                if frame.shape != baseline.shape:
+            if data_source == "probed" and sample.get(
+                    "delta_from_previous") is not None:
+                delta = numpy.asarray(
+                    sample["delta_from_previous"], dtype=float)
+                if delta.shape != baseline.shape:
                     raise ValueError(
                         "sample %s has an invalid delta matrix"
                         % sample.get("sample_index"))
+                frame = delta
+            elif previous is None:
+                frame = numpy.zeros_like(matrix)
+            else:
+                frame = matrix - previous
         else:
             raise ValueError("unknown render mode: %s" % mode)
         frames.append(frame)
+        previous = matrix
     return numpy.asarray(frames)
 
 
 def render_gif(
     samples, output_path, mode="baseline", view="heatmap",
-    fps=1.0, dpi=120, z_exaggeration=2.0,
+    fps=1.0, dpi=120, z_exaggeration=2.0, data_source="mesh",
 ):
     import matplotlib
 
@@ -72,7 +96,7 @@ def render_gif(
     if z_exaggeration <= 0:
         raise ValueError("z_exaggeration must be above zero")
 
-    frames = prepare_frames(samples, mode)
+    frames = prepare_frames(samples, mode, data_source)
     if not numpy.isfinite(frames).all():
         raise ValueError("sample data contains non-finite values")
 
@@ -170,10 +194,11 @@ def render_gif(
         if maximum_delta is not None:
             suffix = " | max |delta| %.4f mm" % maximum_delta
         axes.set_title(
-            "Bed expansion - %s %s | sample %d | %.1f s%s"
+            "Bed expansion - %s %s %s | sample %d | %.1f s%s"
             % (
                 view,
                 mode,
+                data_source,
                 sample.get("sample_index", frame_index),
                 sample.get("elapsed_s", 0.),
                 suffix,
@@ -217,6 +242,9 @@ def main():
         "--view", choices=("heatmap", "surface"), default="heatmap",
         help="2D heatmap or animated isometric 3D surface")
     parser.add_argument(
+        "--data-source", choices=("mesh", "probed"), default="mesh",
+        help="interpolated Klipper mesh or raw probed points")
+    parser.add_argument(
         "--output", help="Output GIF path (default: beside the JSONL file)")
     parser.add_argument(
         "--fps", type=float, default=1.0,
@@ -236,12 +264,14 @@ def main():
     output = args.output
     if output is None:
         base, _ = os.path.splitext(args.run)
-        output = "%s_%s_%s.gif" % (base, args.mode, args.view)
+        output = "%s_%s_%s_%s.gif" % (
+            base, args.mode, args.view, args.data_source)
     samples = load_samples(args.run)
     print(render_gif(
         samples, output, mode=args.mode, view=args.view,
         fps=args.fps, dpi=args.dpi,
-        z_exaggeration=args.z_exaggeration))
+        z_exaggeration=args.z_exaggeration,
+        data_source=args.data_source))
 
 
 if __name__ == "__main__":

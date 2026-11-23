@@ -83,6 +83,10 @@ class BedExpansion:
             "rehome_z_before_scan", True)
         self.relevel_before_scan = config.getboolean(
             "relevel_before_scan", True)
+        self.mesh_reject_tolerance = config.getfloat(
+            "mesh_reject_tolerance", .1, minval=0.)
+        self.mesh_retries = config.getint(
+            "mesh_retries", 1, minval=0)
         self.printer_data_dir = self._printer_data_dir(
             self.printer.get_start_args())
         self.render_on_finish = config.getboolean(
@@ -102,6 +106,11 @@ class BedExpansion:
             "render_dpi", 120, minval=20)
         self.render_z_exaggeration = config.getfloat(
             "render_z_exaggeration", 2., above=0.)
+        self.render_data_source = config.get(
+            "render_data_source", "mesh").strip().lower()
+        if self.render_data_source not in ("mesh", "probed"):
+            raise config.error(
+                "render_data_source must be mesh or probed")
         self.heatsoak_profiles = self._load_heatsoak_profiles(
             config.get("heatsoak_profiles", "{}"), config.error)
         aio_dispatcher = self.printer.load_object(
@@ -120,6 +129,8 @@ class BedExpansion:
         self.sample_count = 0
         self.stable_count = 0
         self.sample_elapsed_times = []
+        self.last_valid_z_mesh = None
+        self.last_mesh_rejected = False
         self.last_error = None
         self.analysis_started_at = None
         self.phase_started_at = None
@@ -280,6 +291,8 @@ class BedExpansion:
         self.sample_count = 0
         self.stable_count = 0
         self.sample_elapsed_times = []
+        self.last_valid_z_mesh = None
+        self.last_mesh_rejected = False
         self.analysis_started_at = None
         self.next_scan_at = None
         try:
@@ -301,17 +314,19 @@ class BedExpansion:
             % (mode, self.run_file))
 
     def _start_mesh_scan(self, eventtime):
-        if self.relevel_before_scan or self.rehome_z_before_scan:
-            self.gcode.run_script_from_command("BED_MESH_CLEAR")
-        if self.relevel_before_scan:
-            _, level_command = self._find_leveler()
-            if level_command is not None:
-                self.gcode.run_script_from_command(level_command)
-        if self.rehome_z_before_scan:
-            self.gcode.run_script_from_command("G28 Z")
-        self._perform_mesh_scan()
+        for attempt in range(self.mesh_retries + 1):
+            if self.relevel_before_scan or self.rehome_z_before_scan:
+                self.gcode.run_script_from_command("BED_MESH_CLEAR")
+            if self.relevel_before_scan:
+                _, level_command = self._find_leveler()
+                if level_command is not None:
+                    self.gcode.run_script_from_command(level_command)
+            if self.rehome_z_before_scan:
+                self.gcode.run_script_from_command("G28 Z")
+            if self._perform_mesh_scan(attempt):
+                return
 
-    def _perform_mesh_scan(self):
+    def _perform_mesh_scan(self, attempt=0):
         bed_mesh = self.printer.lookup_object("bed_mesh")
         command = [self.run["mesh_command"]]
         if "PROFILE=" not in self.run["mesh_command"].upper():
@@ -346,9 +361,9 @@ class BedExpansion:
         completed_at = self.reactor.monotonic()
         self.next_scan_at = completed_at + self.run["interval_s"]
         self._set_phase("scanning", completed_at)
-        self._capture_mesh(completed_at)
+        return self._capture_mesh(completed_at, attempt)
 
-    def _capture_mesh(self, eventtime):
+    def _capture_mesh(self, eventtime, attempt=0):
         bed_mesh = self.printer.lookup_object("bed_mesh")
         z_mesh = bed_mesh.get_mesh()
         if z_mesh is None:
@@ -362,6 +377,45 @@ class BedExpansion:
         if self.previous_mesh is not None:
             delta = mesh_delta(self.previous_mesh, probed_matrix)
             metrics = delta_metrics(delta)
+
+        rejection_reason = None
+        if (
+            metrics is not None
+            and metrics["max_abs_delta_mm"] > self.mesh_reject_tolerance
+        ):
+            rejection_reason = (
+                "maximum point delta %.6f mm exceeds %.6f mm"
+                % (
+                    metrics["max_abs_delta_mm"],
+                    self.mesh_reject_tolerance,
+                ))
+        if rejection_reason is not None:
+            bed_mesh = self.printer.lookup_object("bed_mesh")
+            bed_mesh.set_mesh(self.last_valid_z_mesh)
+            self.stable_count = 0
+            self.last_mesh_rejected = True
+            self._append_record({
+                "type": "rejected_sample",
+                "run_id": self.run["run_id"],
+                "sample_index": self.sample_count,
+                "attempt": attempt,
+                "elapsed_s": eventtime - self.analysis_started_at,
+                "captured_at": self._utc_now(),
+                "probed_matrix": probed_matrix,
+                "mesh_matrix": [
+                    [float(value) for value in row]
+                    for row in z_mesh.get_mesh_matrix()
+                ],
+                "delta_from_previous": delta,
+                "metrics": metrics,
+                "reason": rejection_reason,
+            })
+            self.sample_count += 1
+            self.gcode.respond_info(
+                "Rejected bed mesh sample %d (attempt %d): %s; "
+                "previous valid mesh restored"
+                % (self.sample_count, attempt + 1, rejection_reason))
+            return False
 
         stable = False
         if metrics is not None:
@@ -397,8 +451,10 @@ class BedExpansion:
         }
         self._append_record(record)
         self.sample_count += 1
+        self.last_mesh_rejected = False
         self.sample_elapsed_times.append(
             eventtime - self.analysis_started_at)
+        self.last_valid_z_mesh = z_mesh
         self.previous_mesh = probed_matrix
         self.latest_metrics = metrics
         self.gcode.respond_info(
@@ -556,6 +612,7 @@ class BedExpansion:
             fps=self.render_fps,
             dpi=self.render_dpi,
             z_exaggeration=self.render_z_exaggeration,
+            data_source=self.render_data_source,
         )
 
     def _show_rendered_file(self, output_file):
@@ -675,6 +732,7 @@ class BedExpansion:
             "sample_count": self.sample_count,
             "stable_window_count": self.stable_count,
             "latest_metrics": self.latest_metrics,
+            "last_mesh_rejected": self.last_mesh_rejected,
             "heatsoak_profiles": self.heatsoak_profiles,
             "elapsed_s": elapsed,
             "last_error": self.last_error,

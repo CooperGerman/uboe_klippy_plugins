@@ -151,6 +151,8 @@ class BedExpansionStateTests(unittest.TestCase):
         plugin.rehome_z_before_scan = False
         plugin.relevel_before_scan = False
         plugin.render_on_finish = False
+        plugin.mesh_reject_tolerance = .1
+        plugin.mesh_retries = 1
         plugin.output_dir = output_dir
         plugin.active = True
         plugin.phase = "scanning"
@@ -171,6 +173,8 @@ class BedExpansionStateTests(unittest.TestCase):
         plugin.sample_count = 1
         plugin.stable_count = 1
         plugin.sample_elapsed_times = [10.]
+        plugin.last_valid_z_mesh = None
+        plugin.last_mesh_rejected = False
         plugin.analysis_started_at = 10.
         plugin.phase_started_at = 10.
         plugin.next_scan_at = 130.
@@ -234,6 +238,34 @@ class BedExpansionStateTests(unittest.TestCase):
             self.assertTrue(plugin.active)
             self.assertEqual(plugin.stable_count, 0)
             self.assertEqual(plugin.phase, "interval")
+
+    def test_large_point_jump_rejects_mesh_and_restores_previous(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            plugin = self.make_plugin(output_dir)
+            previous_z_mesh = FakeZMesh([[0., 0.], [0., 0.]])
+            candidate = FakeZMesh([[.2, 0.], [0., 0.]])
+            restored = []
+            bed_mesh = SimpleNamespace(
+                get_mesh=lambda: candidate,
+                set_mesh=lambda mesh: restored.append(mesh),
+            )
+            plugin.printer = SimpleNamespace(
+                lookup_object=lambda name, default=None: (
+                    bed_mesh if name == "bed_mesh" else default
+                ))
+            plugin.last_valid_z_mesh = previous_z_mesh
+
+            accepted = plugin._capture_mesh(20.)
+
+            self.assertFalse(accepted)
+            self.assertEqual(restored, [previous_z_mesh])
+            self.assertTrue(plugin.last_mesh_rejected)
+            self.assertEqual(plugin.stable_count, 0)
+            self.assertEqual(plugin.previous_mesh, [[0., 0.], [0., 0.]])
+            with open(plugin.run_file) as result_file:
+                record = json.loads(result_file.readline())
+            self.assertEqual(record["type"], "rejected_sample")
+            self.assertIn("maximum point delta", record["reason"])
 
     def test_failure_elapsed_time_uses_current_monotonic_time(self):
         with tempfile.TemporaryDirectory() as output_dir:

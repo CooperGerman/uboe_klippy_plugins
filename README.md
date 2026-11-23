@@ -122,6 +122,7 @@ relevel_before_scan: True
 render_on_finish: True
 render_mode: baseline
 render_view: surface
+render_data_source: mesh
 render_fps: 1
 render_dpi: 120
 render_z_exaggeration: 2
@@ -131,6 +132,8 @@ mesh_command: BED_MESH_CALIBRATE
 # mesh_probe_count: 20,20
 # mesh_min: 20,20
 # mesh_max: 570,580
+mesh_reject_tolerance: 0.1
+mesh_retries: 1
 ```
 
 All command time values are seconds and all mesh-delta values are millimetres.
@@ -150,6 +153,13 @@ The plugin:
 5. Captures a bed mesh immediately, then waits the configured interval after
    that mesh completes before starting the next scan. A slow mesh therefore
    never causes scans to overlap or bunch together.
+   A mesh is rejected when any point differs from the last accepted raw mesh
+   by more than `mesh_reject_tolerance`. The prior valid mesh is restored so a
+   bad scan is never left active, and up to `mesh_retries` fresh scans are
+   attempted immediately. Rejected samples are stored as `rejected_sample` JSONL
+   records, but do not count toward the stable window or replace the previous
+   valid mesh. This keeps the mesh used by `BED_EXPANSION_WAIT` valid; a separate
+   ordinary `BED_MESH_CALIBRATE` outside the plugin is not covered by this check.
 6. Runs `park_macro` after each capture.
 7. Turns the bed heater off when the run completes, stabilizes, times out, or
    fails.
@@ -282,6 +292,8 @@ python3 -m pip install -r requirements-render.txt
 The output GIF is written beside the run by default. `--output` and `--fps`
 allow overriding its destination and playback speed. `--view heatmap` creates
 the 2D top view; `--view surface` creates an isometric 3D mesh.
+`--data-source mesh` uses Klipper's smoother interpolated bed mesh and is the
+default; `--data-source probed` visualizes only the raw sampled probe grid.
 `--z-exaggeration` multiplies the visual vertical scale for surface views and
 defaults to 2; use 1 for the base scale or 3 for stronger deformation.
 Rendering modes are:
