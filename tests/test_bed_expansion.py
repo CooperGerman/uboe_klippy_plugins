@@ -386,10 +386,12 @@ class BedExpansionStateTests(unittest.TestCase):
             MESH_MIN="20,25",
             MESH_MAX="180,190",
             MESH_COMMAND="MY_BED_MESH",
+            PROFILE="ratos",
         ))
 
         self.assertEqual(parameters, {
             "mesh_command": "MY_BED_MESH",
+            "mesh_profile": "ratos",
             "speed": 40.,
             "probe_count": (8, 10),
             "mesh_min": (20., 25.),
@@ -405,6 +407,7 @@ class BedExpansionStateTests(unittest.TestCase):
                 "probe_count": (10, 12),
                 "mesh_min": (20., 25.),
                 "mesh_max": (500., 550.),
+                "mesh_profile": "ratos",
             })
             observed_speeds = []
 
@@ -430,9 +433,9 @@ class BedExpansionStateTests(unittest.TestCase):
             self.assertEqual(probe_manager.probe_helper.speed, 100.)
             self.assertEqual(observed_speeds, [(
                 "BED_MESH_CALIBRATE METHOD=rapid "
-                "PROFILE=__bed_expansion_analysis__ "
                 "SCAN_SPEED=60.0 PROBE_COUNT=10,12 "
-                "MESH_MIN=20.0,25.0 MESH_MAX=500.0,550.0",
+                "MESH_MIN=20.0,25.0 MESH_MAX=500.0,550.0 "
+                "PROFILE=ratos",
                 60.,
             )])
             self.assertEqual(plugin.next_scan_at, 175.)

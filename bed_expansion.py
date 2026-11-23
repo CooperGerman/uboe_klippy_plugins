@@ -329,16 +329,18 @@ class BedExpansion:
     def _perform_mesh_scan(self, attempt=0):
         bed_mesh = self.printer.lookup_object("bed_mesh")
         command = [self.run["mesh_command"]]
-        if "PROFILE=" not in self.run["mesh_command"].upper():
+        if "PROFILE=" not in self.run["mesh_command"].upper() and (
+                self.run.get("mesh_profile") is None):
             command.append("PROFILE=__bed_expansion_analysis__")
         mesh_options = (
             ("speed", "SCAN_SPEED"),
             ("probe_count", "PROBE_COUNT"),
             ("mesh_min", "MESH_MIN"),
             ("mesh_max", "MESH_MAX"),
+            ("mesh_profile", "PROFILE"),
         )
         for key, option in mesh_options:
-            values = self.run[key]
+            values = self.run.get(key)
             if values is None:
                 continue
             if isinstance(values, tuple):
@@ -896,6 +898,7 @@ class BedExpansion:
                 "MESH_COMMAND must be a single non-empty G-code command")
         return {
             "mesh_command": mesh_command,
+            "mesh_profile": gcmd.get("PROFILE", None),
             "speed": speed,
             "probe_count": self._gcmd_pair(
                 gcmd, "PROBE_COUNT", self.default_probe_count, int, 3),
