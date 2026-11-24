@@ -124,8 +124,9 @@ render_mode: baseline
 render_view: surface
 render_data_source: mesh
 render_fps: 1
-render_dpi: 120
+render_dpi: 80
 render_z_exaggeration: 2
+save_wait_profile: True
 # Optional bed-mesh overrides. Omit these to use [bed_mesh] defaults.
 mesh_command: BED_MESH_CALIBRATE
 # mesh_speed: 100
@@ -165,8 +166,8 @@ The plugin:
    fails.
 
 Successful runs with at least two samples are rendered automatically. Rendering
-uses Klipper's threaded `aio_executor`, so Matplotlib and Pillow do not run in
-the printer's main thread. The GIF is saved beside the JSONL file and displayed
+uses a separate renderer process, so Matplotlib and Pillow do not run in
+Klipper's process or block `START_PRINT`. The GIF is saved beside the JSONL file and displayed
 in the web console through Moonraker's file server. The printer-data root is
 derived from Klipper's startup `config_file` path. Set `render_on_finish: False`
 to disable automatic output.
@@ -223,7 +224,9 @@ BED_EXPANSION_WAIT TARGET={bed_temp} INTERVAL=120 TIMEOUT=7200 TOLERANCE=0.01 ME
 remaining macro until stability is reached. `ON_TIMEOUT=error` is the safe
 default and aborts the pending print-start command; `ON_TIMEOUT=warn` keeps the
 heater hot and continues. Print-time runs update `printer` status but do not
-stage an autosave profile.
+stage an autosave profile unless `save_wait_profile: True` (the default). A
+print-time stable result is then staged in `save_config_pending` exactly like
+`BED_EXPANSION_CALIBRATE`; call `SAVE_CONFIG` manually when appropriate.
 
 Mesh settings can be overridden for either command. Global `mesh_*` options
 in `[bed_expansion]` provide defaults for every run; command

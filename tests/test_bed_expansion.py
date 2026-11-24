@@ -283,21 +283,55 @@ class BedExpansionStateTests(unittest.TestCase):
     def test_render_completed_run_displays_console_image(self):
         with tempfile.TemporaryDirectory() as output_dir:
             plugin = self.make_plugin(output_dir)
+            plugin.run_file = os.path.join(output_dir, "run.jsonl")
             plugin.render_mode = "baseline"
             plugin.render_view = "surface"
             plugin.printer_data_dir = "/home/uboe/printer_data"
             output_file = (
                 "/home/uboe/printer_data/logs/bed_expansion/run.gif")
-            plugin.render_executor = SimpleNamespace(
-                submit=lambda function, run_file: output_file)
+            callbacks = []
+            plugin.reactor.register_async_callback = (
+                lambda callback: callbacks.append(callback))
 
-            plugin._render_finished_run()
+            with mock.patch.object(
+                plugin, "_render_run_file", return_value=output_file
+            ):
+                class ImmediateThread:
+                    def __init__(self, target, args, **kwargs):
+                        self.target = target
+                        self.args = args
 
+                    def start(self):
+                        self.target(*self.args)
+
+                with mock.patch.object(
+                    bed_expansion.threading, "Thread", ImmediateThread
+                ):
+                    plugin._render_finished_run()
+
+            self.assertIn("background", plugin.gcode.messages[-1])
+            callbacks[0](0.)
             self.assertEqual(len(plugin.gcode.raw_messages), 1)
             message = plugin.gcode.raw_messages[0]
             self.assertIn(
                 "../server/files/logs/bed_expansion/run.gif", message)
             self.assertIn("<img", message)
+
+    def test_wait_profile_persistence_can_be_enabled(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            plugin = self.make_plugin(output_dir)
+            plugin.run.update({"save_profile": True})
+            plugin.mesh_reject_tolerance = .1
+            plugin.save_wait_profile = True
+            plugin.sample_elapsed_times = [10., 20.]
+            plugin.stable_count = 2
+            plugin.reactor.current_time = 30.
+
+            plugin._finish_run(30., "stable")
+
+            self.assertIn("85", plugin.heatsoak_profiles)
+            self.assertEqual(
+                plugin.heatsoak_profiles["85"]["heatsoak_time_s"], 20.)
 
     def test_printer_data_root_matches_config_file_parent(self):
         self.assertEqual(

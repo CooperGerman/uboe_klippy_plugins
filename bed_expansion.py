@@ -5,6 +5,9 @@ import json
 import logging
 import math
 import os
+import subprocess
+import sys
+import threading
 from urllib.parse import quote
 
 
@@ -103,7 +106,7 @@ class BedExpansion:
         self.render_fps = config.getfloat(
             "render_fps", 1., above=0.)
         self.render_dpi = config.getint(
-            "render_dpi", 120, minval=20)
+            "render_dpi", 80, minval=20)
         self.render_z_exaggeration = config.getfloat(
             "render_z_exaggeration", 2., above=0.)
         self.render_data_source = config.get(
@@ -113,10 +116,8 @@ class BedExpansion:
                 "render_data_source must be mesh or probed")
         self.heatsoak_profiles = self._load_heatsoak_profiles(
             config.get("heatsoak_profiles", "{}"), config.error)
-        aio_dispatcher = self.printer.load_object(
-            config, "aio_executor")
-        self.render_executor = aio_dispatcher.allocate_executor(
-            "bed-exp-render")
+        self.save_wait_profile = config.getboolean(
+            "save_wait_profile", True)
 
         self.timer = self.reactor.register_timer(
             self._timer_callback, self.reactor.NEVER)
@@ -585,37 +586,61 @@ class BedExpansion:
             % (self.run["target_c"], heatsoak_time))
 
     def _render_finished_run(self):
+        run_file = self.run_file
+        self.gcode.respond_info(
+            "Rendering bed expansion GIF in the background")
+        thread = threading.Thread(
+            target=self._render_finished_run_worker,
+            args=(run_file,),
+            name="bed-exp-render",
+            daemon=True,
+        )
+        thread.start()
+
+    def _render_finished_run_worker(self, run_file):
         try:
-            output_file = self.render_executor.submit(
-                self._render_run_file, self.run_file)
-            self._show_rendered_file(output_file)
+            output_file = self._render_run_file(run_file)
         except Exception as error:
             logging.exception(
                 "bed_expansion: unable to render completed run")
-            self.gcode.respond_info(
-                "Bed expansion GIF rendering failed: %s" % error)
+            self.reactor.register_async_callback(
+                lambda eventtime, error=error:
+                self._report_render_error(error))
+            return
+        self.reactor.register_async_callback(
+            lambda eventtime: self._show_rendered_file(output_file))
 
     def _render_run_file(self, run_file):
-        module_name = (
-            "%s.bed_expansion_render" % __name__.rsplit(".", 1)[0]
-            if "." in __name__
-            else "bed_expansion_render"
-        )
-        renderer = importlib.import_module(module_name)
         base, _ = os.path.splitext(run_file)
         output_file = "%s_%s_%s.gif" % (
             base, self.render_mode, self.render_view)
-        samples = renderer.load_samples(run_file)
-        return renderer.render_gif(
-            samples,
-            output_file,
-            mode=self.render_mode,
-            view=self.render_view,
-            fps=self.render_fps,
-            dpi=self.render_dpi,
-            z_exaggeration=self.render_z_exaggeration,
-            data_source=self.render_data_source,
+        renderer_script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "bed_expansion_render.py",
         )
+        subprocess.run(
+            [
+                sys.executable,
+                renderer_script,
+                run_file,
+                "--mode", self.render_mode,
+                "--view", self.render_view,
+                "--data-source", self.render_data_source,
+                "--fps", str(self.render_fps),
+                "--dpi", str(self.render_dpi),
+                "--z-exaggeration", str(self.render_z_exaggeration),
+                "--output", output_file,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        return output_file
+
+    def _report_render_error(self, error):
+        self.gcode.respond_info(
+            "Bed expansion GIF rendering failed: %s" % error)
 
     def _show_rendered_file(self, output_file):
         output_file = os.path.realpath(output_file)
@@ -817,7 +842,7 @@ class BedExpansion:
             "metric": metric,
             "stable_window": stable_window,
             "keep_heater_on": True,
-            "save_profile": False,
+            "save_profile": bool(self.save_wait_profile),
             **self._mesh_parameters(gcmd),
         }
         eventtime = self._initialize_run(gcmd, "wait", parameters)
