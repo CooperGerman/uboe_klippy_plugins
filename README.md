@@ -54,6 +54,7 @@ The table below lists the plugins and their functionality.
 | | `BED_EXPANSION_ANALYZE` | Captures meshes for a fixed duration at a requested bed target. |
 | | `BED_EXPANSION_CALIBRATE` | Captures meshes until the configured stability window is reached or the timeout expires. |
 | | `BED_EXPANSION_WAIT` | Blocks print-start until the bed mesh is stable or the timeout policy is applied. |
+| | `BED_EXPANSION_ABORT` | Stops an active run, records an interrupted result, and turns the bed heater off. |
 | | `BED_EXPANSION_LOAD` | Loads a captured sample into the live Klipper bed mesh for visualization in Mainsail. |
 | | `BED_EXPANSION_STATUS` | Reports run state, sample count, latest deltas, and output file. |
 |  |  |  |
@@ -232,6 +233,11 @@ heater hot and continues. Print-time runs update `printer` status but do not
 stage an autosave profile unless `save_wait_profile: True` (the default). A
 print-time stable result is then staged in `save_config_pending` exactly like
 `BED_EXPANSION_CALIBRATE`; call `SAVE_CONFIG` manually when appropriate.
+
+Print cancellation, SD reset, Klipper restart/disconnect, shutdown, and any
+G-code command error abort the active run. The bed is turned off on abort,
+failure, shutdown, or an error timeout. `BED_EXPANSION_ABORT` can also be used
+manually to recover an active run.
 
 Mesh settings can be overridden for either command. Global `mesh_*` options
 in `[bed_expansion]` provide defaults for every run; command

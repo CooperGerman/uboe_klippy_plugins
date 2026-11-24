@@ -145,6 +145,16 @@ class BedExpansion:
 
         self.printer.register_event_handler(
             "klippy:shutdown", self._handle_shutdown)
+        self.printer.register_event_handler(
+            "klippy:disconnect", self._handle_disconnect)
+        self.printer.register_event_handler(
+            "gcode:command_error", self._handle_command_error)
+        self.printer.register_event_handler(
+            "gcode:request_restart", self._handle_request_restart)
+        self.printer.register_event_handler(
+            "virtual_sdcard:reset_file", self._handle_print_cancel)
+        self.printer.register_event_handler(
+            "klippy:ready", self._wrap_cancel_command)
         self.gcode.register_command(
             "BED_EXPANSION_ANALYZE", self.cmd_BED_EXPANSION_ANALYZE,
             desc=self.cmd_BED_EXPANSION_ANALYZE_help)
@@ -154,6 +164,9 @@ class BedExpansion:
         self.gcode.register_command(
             "BED_EXPANSION_WAIT", self.cmd_BED_EXPANSION_WAIT,
             desc=self.cmd_BED_EXPANSION_WAIT_help)
+        self.gcode.register_command(
+            "BED_EXPANSION_ABORT", self.cmd_BED_EXPANSION_ABORT,
+            desc=self.cmd_BED_EXPANSION_ABORT_help)
         self.gcode.register_command(
             "BED_EXPANSION_STATUS", self.cmd_BED_EXPANSION_STATUS,
             desc=self.cmd_BED_EXPANSION_STATUS_help)
@@ -541,7 +554,7 @@ class BedExpansion:
         eventtime = self.reactor.monotonic()
         self.active = False
         self.reactor.update_timer(self.timer, self.reactor.NEVER)
-        if not self.run.get("keep_heater_on"):
+        if error is not None or not self.run.get("keep_heater_on"):
             try:
                 self._set_bed_target(0.)
             except Exception:
@@ -773,11 +786,38 @@ class BedExpansion:
                                % self.phase)
 
     def _handle_shutdown(self):
+        self._abort_active("Klipper shut down during analysis")
+
+    def _handle_disconnect(self):
+        self._abort_active("Klipper disconnected during analysis")
+
+    def _handle_command_error(self):
+        self._abort_active("A G-code command error interrupted analysis")
+
+    def _handle_request_restart(self, *args):
+        self._abort_active("Klipper restart requested during analysis")
+
+    def _handle_print_cancel(self):
+        self._abort_active("Print reset or cancelled during analysis")
+
+    def _wrap_cancel_command(self):
+        previous = self.gcode.register_command("CANCEL_PRINT", None)
+        if previous is None:
+            return
+
+        def cancel_print(gcmd):
+            self._abort_active("Print cancelled during analysis")
+            previous(gcmd)
+
+        self.gcode.register_command(
+            "CANCEL_PRINT", cancel_print,
+            desc="Cancel the current print and bed expansion analysis")
+
+    def _abort_active(self, reason):
         if not self.active:
             return
         eventtime = self.reactor.monotonic()
-        self._finish_run(eventtime, "interrupted",
-                         "Klipper shut down during analysis")
+        self._finish_run(eventtime, "interrupted", reason)
 
     def get_status(self, eventtime=None):
         eventtime = eventtime or self.reactor.monotonic()
@@ -855,6 +895,16 @@ class BedExpansion:
     cmd_BED_EXPANSION_WAIT_help = (
         "Block until the hot bed mesh remains stable or the timeout expires")
 
+    cmd_BED_EXPANSION_ABORT_help = (
+        "Abort an active bed expansion analysis and turn off the bed heater")
+
+    def cmd_BED_EXPANSION_ABORT(self, gcmd):
+        if not self.active:
+            gcmd.respond_info("No bed expansion analysis is active")
+            return
+        self._abort_active("Analysis aborted by BED_EXPANSION_ABORT")
+        gcmd.respond_info("Bed expansion analysis aborted")
+
     def cmd_BED_EXPANSION_WAIT(self, gcmd):
         target = gcmd.get_float("TARGET", above=0.)
         interval = gcmd.get_float(
@@ -915,7 +965,10 @@ class BedExpansion:
                     return
                 next_wake = min(self.next_scan_at, deadline)
                 self.reactor.pause(next_wake)
-        except gcmd.error:
+        except gcmd.error as error:
+            if self.active:
+                self._finish_run(
+                    self.reactor.monotonic(), "failed", str(error))
             raise
         except Exception as error:
             self._finish_run(

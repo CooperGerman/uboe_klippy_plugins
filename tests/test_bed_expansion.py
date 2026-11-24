@@ -368,6 +368,37 @@ class BedExpansionStateTests(unittest.TestCase):
                 records = [json.loads(line) for line in result_file]
             self.assertEqual(records[-1]["elapsed_s"], 210.)
 
+    def test_abort_finishes_active_run_and_turns_off_heater(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            plugin = self.make_plugin(output_dir)
+            plugin.run.update({
+                "keep_heater_on": True,
+                "save_profile": True,
+            })
+            plugin.run_file = os.path.join(output_dir, "abort.jsonl")
+            plugin.reactor.current_time = 50.
+            plugin.analysis_started_at = 10.
+
+            plugin._abort_active("Print cancelled")
+
+            self.assertFalse(plugin.active)
+            self.assertEqual(plugin.phase, "interrupted")
+            self.assertEqual(plugin.last_error, "Print cancelled")
+            self.assertIn("M140 S0.000", plugin.gcode.scripts)
+            with open(plugin.run_file) as result_file:
+                records = [json.loads(line) for line in result_file]
+            self.assertEqual(records[-1]["result"], "interrupted")
+
+    def test_command_error_aborts_active_run(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            plugin = self.make_plugin(output_dir)
+            plugin.run_file = os.path.join(output_dir, "error.jsonl")
+
+            plugin._handle_command_error()
+
+            self.assertFalse(plugin.active)
+            self.assertIn("G-code command error", plugin.last_error)
+
     def test_render_completed_run_displays_console_image(self):
         with tempfile.TemporaryDirectory() as output_dir:
             plugin = self.make_plugin(output_dir)
@@ -475,7 +506,7 @@ class BedExpansionStateTests(unittest.TestCase):
                 "PROFILE=__bed_expansion_analysis__",
             ])
 
-    def test_wait_timeout_action_error_finishes_failed_without_heater_off(self):
+    def test_wait_timeout_action_error_finishes_failed_and_heater_off(self):
         with tempfile.TemporaryDirectory() as output_dir:
             plugin = self.make_plugin(output_dir)
             plugin.active = True
@@ -489,7 +520,7 @@ class BedExpansionStateTests(unittest.TestCase):
 
             plugin._finish_run(610., "failed", "Bed did not stabilize")
 
-            self.assertNotIn("M140 S0.000", plugin.gcode.scripts)
+            self.assertIn("M140 S0.000", plugin.gcode.scripts)
             with open(plugin.run_file) as result_file:
                 records = [json.loads(line) for line in result_file]
             self.assertEqual(records[-1]["result"], "failed")
