@@ -135,6 +135,7 @@ mesh_command: BED_MESH_CALIBRATE
 # mesh_max: 570,580
 mesh_reject_tolerance: 0.1
 mesh_retries: 1
+max_rejected_meshes_before_fail: 3
 ```
 
 All command time values are seconds and all mesh-delta values are millimetres.
@@ -159,9 +160,13 @@ The plugin:
    bad scan is never left active, and up to `mesh_retries` fresh scans are
    attempted immediately. Rejected samples are stored as `rejected_sample` JSONL
    records, but do not count toward the stable window or replace the previous
-   valid mesh. This keeps the mesh used by `BED_EXPANSION_WAIT` valid; a separate
+   valid mesh. The consecutive rejection count resets after an accepted mesh.
+   If it reaches `max_rejected_meshes_before_fail`, the run fails instead of
+   continuing to probe a faulty sensor. Set the limit to 0 to disable this guard.
+   This keeps the mesh used by `BED_EXPANSION_WAIT` valid; a separate
    ordinary `BED_MESH_CALIBRATE` outside the plugin is not covered by this check.
-6. Runs `park_macro` after each capture.
+6. Runs `park_macro` after each accepted or rejected scan attempt. If
+   `park_macro` is not configured, a warning is emitted once per run.
 7. Turns the bed heater off when the run completes, stabilizes, times out, or
    fails.
 

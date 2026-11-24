@@ -81,7 +81,9 @@ class BedExpansion:
             config, "mesh_min", float)
         self.default_mesh_max = self._config_pair(
             config, "mesh_max", float)
-        self.park_macro = config.get("park_macro", "PARK").strip()
+        self.park_macro = config.get("park_macro", None)
+        if self.park_macro is not None:
+            self.park_macro = self.park_macro.strip()
         self.rehome_z_before_scan = config.getboolean(
             "rehome_z_before_scan", True)
         self.relevel_before_scan = config.getboolean(
@@ -90,6 +92,8 @@ class BedExpansion:
             "mesh_reject_tolerance", .1, minval=0.)
         self.mesh_retries = config.getint(
             "mesh_retries", 1, minval=0)
+        self.max_rejected_meshes_before_fail = config.getint(
+            "max_rejected_meshes_before_fail", 3, minval=0)
         self.printer_data_dir = self._printer_data_dir(
             self.printer.get_start_args())
         self.render_on_finish = config.getboolean(
@@ -123,6 +127,7 @@ class BedExpansion:
             self._timer_callback, self.reactor.NEVER)
         self.active = False
         self.phase = "idle"
+        self.park_warning_sent = False
         self.run = None
         self.run_file = None
         self.previous_mesh = None
@@ -132,6 +137,7 @@ class BedExpansion:
         self.sample_elapsed_times = []
         self.last_valid_z_mesh = None
         self.last_mesh_rejected = False
+        self.consecutive_rejected_meshes = 0
         self.last_error = None
         self.analysis_started_at = None
         self.phase_started_at = None
@@ -252,6 +258,12 @@ class BedExpansion:
     def _park(self):
         if self.park_macro:
             self.gcode.run_script_from_command(self.park_macro)
+        elif not self.park_warning_sent:
+            self.gcode.respond_info(
+                "WARNING: Cannot park between bed expansion scans because no "
+                "park_macro is configured in [%s]."
+                % self.config_name)
+            self.park_warning_sent = True
 
     def _append_record(self, record):
         if self.run_file is None:
@@ -286,6 +298,7 @@ class BedExpansion:
         self._bed_heater()
         eventtime = self.reactor.monotonic()
         self.active = True
+        self.park_warning_sent = False
         self.last_error = None
         self.previous_mesh = None
         self.latest_metrics = None
@@ -294,6 +307,7 @@ class BedExpansion:
         self.sample_elapsed_times = []
         self.last_valid_z_mesh = None
         self.last_mesh_rejected = False
+        self.consecutive_rejected_meshes = 0
         self.analysis_started_at = None
         self.next_scan_at = None
         try:
@@ -324,8 +338,13 @@ class BedExpansion:
                     self.gcode.run_script_from_command(level_command)
             if self.rehome_z_before_scan:
                 self.gcode.run_script_from_command("G28 Z")
-            if self._perform_mesh_scan(attempt):
+            accepted = self._perform_mesh_scan(attempt)
+            self._park()
+            if accepted:
                 return
+            if not self.active:
+                raise self.gcode.error(
+                    self.last_error or "bed mesh rejection limit reached")
 
     def _perform_mesh_scan(self, attempt=0):
         bed_mesh = self.printer.lookup_object("bed_mesh")
@@ -397,6 +416,7 @@ class BedExpansion:
             bed_mesh.set_mesh(self.last_valid_z_mesh)
             self.stable_count = 0
             self.last_mesh_rejected = True
+            self.consecutive_rejected_meshes += 1
             self._append_record({
                 "type": "rejected_sample",
                 "run_id": self.run["run_id"],
@@ -412,12 +432,26 @@ class BedExpansion:
                 "delta_from_previous": delta,
                 "metrics": metrics,
                 "reason": rejection_reason,
+                "consecutive_rejected_meshes":
+                    self.consecutive_rejected_meshes,
             })
             self.sample_count += 1
             self.gcode.respond_info(
                 "Rejected bed mesh sample %d (attempt %d): %s; "
                 "previous valid mesh restored"
                 % (self.sample_count, attempt + 1, rejection_reason))
+            if (
+                self.max_rejected_meshes_before_fail
+                and self.consecutive_rejected_meshes
+                >= self.max_rejected_meshes_before_fail
+            ):
+                message = (
+                    "Rejected %d consecutive bed meshes; last rejection: %s"
+                    % (
+                        self.consecutive_rejected_meshes,
+                        rejection_reason,
+                    ))
+                self._finish_run(eventtime, "failed", message)
             return False
 
         stable = False
@@ -455,6 +489,7 @@ class BedExpansion:
         self._append_record(record)
         self.sample_count += 1
         self.last_mesh_rejected = False
+        self.consecutive_rejected_meshes = 0
         self.sample_elapsed_times.append(
             eventtime - self.analysis_started_at)
         self.last_valid_z_mesh = z_mesh
@@ -471,8 +506,6 @@ class BedExpansion:
                     self.run["stable_window"],
                 ) if metrics is not None else "",
             ))
-        self._park()
-
         if (
             self.run["mode"] == "calibrate"
             and self.stable_count >= self.run["stable_window"]
@@ -525,6 +558,8 @@ class BedExpansion:
             ),
             "sample_count": self.sample_count,
             "stable_window_count": self.stable_count,
+            "consecutive_rejected_meshes":
+                self.consecutive_rejected_meshes,
         }
         if error is not None:
             record["error"] = error
@@ -760,6 +795,8 @@ class BedExpansion:
             "stable_window_count": self.stable_count,
             "latest_metrics": self.latest_metrics,
             "last_mesh_rejected": self.last_mesh_rejected,
+            "consecutive_rejected_meshes":
+                self.consecutive_rejected_meshes,
             "heatsoak_profiles": self.heatsoak_profiles,
             "elapsed_s": elapsed,
             "last_error": self.last_error,

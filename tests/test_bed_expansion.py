@@ -153,7 +153,10 @@ class BedExpansionStateTests(unittest.TestCase):
         plugin.render_on_finish = False
         plugin.mesh_reject_tolerance = .1
         plugin.mesh_retries = 1
+        plugin.max_rejected_meshes_before_fail = 3
         plugin.output_dir = output_dir
+        plugin.config_name = "bed_expansion"
+        plugin.park_warning_sent = False
         plugin.active = True
         plugin.phase = "scanning"
         plugin.run = {
@@ -175,11 +178,11 @@ class BedExpansionStateTests(unittest.TestCase):
         plugin.sample_elapsed_times = [10.]
         plugin.last_valid_z_mesh = None
         plugin.last_mesh_rejected = False
+        plugin.consecutive_rejected_meshes = 0
         plugin.analysis_started_at = 10.
         plugin.phase_started_at = 10.
         plugin.next_scan_at = 130.
         plugin.last_error = None
-        plugin.config_name = "bed_expansion"
         plugin.heatsoak_profiles = {}
         plugin.config_saves = []
         plugin.configfile = SimpleNamespace(
@@ -212,7 +215,6 @@ class BedExpansionStateTests(unittest.TestCase):
                 [[.005, -.005], [.009, -.009]],
             )
             self.assertEqual(records[-1]["result"], "stable")
-            self.assertIn("PARK", plugin.gcode.scripts)
             self.assertIn("M140 S0.000", plugin.gcode.scripts)
             self.assertEqual(
                 plugin.config_saves[0][:2],
@@ -266,6 +268,92 @@ class BedExpansionStateTests(unittest.TestCase):
                 record = json.loads(result_file.readline())
             self.assertEqual(record["type"], "rejected_sample")
             self.assertIn("maximum point delta", record["reason"])
+
+    def test_scan_cycle_parks_after_rejected_attempt(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            plugin = self.make_plugin(output_dir)
+            plugin.mesh_retries = 1
+            plugin.run.update({
+                "mesh_command": "BED_MESH_CALIBRATE",
+                "speed": None,
+                "probe_count": None,
+                "mesh_min": None,
+                "mesh_max": None,
+            })
+            candidate = FakeZMesh([[.2, 0.], [0., 0.]])
+            bed_mesh = SimpleNamespace(
+                bmc=SimpleNamespace(probe_mgr=SimpleNamespace(
+                    probe_helper=SimpleNamespace(speed=100.))),
+                get_mesh=lambda: candidate,
+                set_mesh=lambda mesh: None,
+            )
+            plugin.printer = SimpleNamespace(
+                lookup_object=lambda name: bed_mesh)
+            plugin._perform_mesh_scan = mock.Mock(
+                side_effect=lambda attempt: False
+                if attempt == 0 else True)
+
+            plugin._start_mesh_scan(10.)
+
+            self.assertEqual(
+                plugin.gcode.scripts.count("PARK"), 2)
+
+    def test_missing_park_macro_warns_once(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            plugin = self.make_plugin(output_dir)
+            plugin.park_macro = None
+            plugin._park = (
+                bed_expansion.BedExpansion._park.__get__(
+                    plugin, bed_expansion.BedExpansion))
+
+            plugin._park()
+            plugin._park()
+
+            self.assertEqual(
+                plugin.gcode.messages,
+                [
+                    "WARNING: Cannot park between bed expansion scans because "
+                    "no park_macro is configured in [bed_expansion].",
+                ],
+            )
+
+    def test_rejected_mesh_limit_fails_run(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            plugin = self.make_plugin(output_dir)
+            plugin.max_rejected_meshes_before_fail = 2
+            plugin.consecutive_rejected_meshes = 1
+            candidate = FakeZMesh([[.2, 0.], [0., 0.]])
+            bed_mesh = SimpleNamespace(
+                get_mesh=lambda: candidate,
+                set_mesh=lambda mesh: None,
+            )
+            plugin.printer = SimpleNamespace(
+                lookup_object=lambda name, default=None: (
+                    bed_mesh if name == "bed_mesh" else default
+                ))
+
+            accepted = plugin._capture_mesh(20.)
+
+            self.assertFalse(accepted)
+            self.assertFalse(plugin.active)
+            self.assertEqual(plugin.phase, "failed")
+            self.assertIn("2 consecutive", plugin.last_error)
+
+    def test_accepted_mesh_resets_rejected_mesh_count(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            plugin = self.make_plugin(output_dir)
+            plugin.consecutive_rejected_meshes = 2
+            plugin.printer = SimpleNamespace(
+                lookup_object=lambda name, default=None: (
+                    SimpleNamespace(
+                        get_mesh=lambda: FakeZMesh([[.005, 0.], [0., 0.]]))
+                    if name == "bed_mesh" else default
+                ))
+
+            plugin._capture_mesh(20.)
+
+            self.assertEqual(plugin.consecutive_rejected_meshes, 0)
+            self.assertFalse(plugin.last_mesh_rejected)
 
     def test_failure_elapsed_time_uses_current_monotonic_time(self):
         with tempfile.TemporaryDirectory() as output_dir:
