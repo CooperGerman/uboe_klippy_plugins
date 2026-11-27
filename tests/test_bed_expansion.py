@@ -97,6 +97,11 @@ class MeshCommand(LoadCommand):
         return value
 
 
+class WaitCommand(LoadCommand):
+    def get_float(self, name, default=None, above=None, minval=None):
+        return float(self.parameters.get(name, default))
+
+
 class BedExpansionMathTests(unittest.TestCase):
     def test_heatsoak_profiles_must_be_temperature_keyed_json_object(self):
         profiles = bed_expansion.BedExpansion \
@@ -524,6 +529,60 @@ class BedExpansionStateTests(unittest.TestCase):
             with open(plugin.run_file) as result_file:
                 records = [json.loads(line) for line in result_file]
             self.assertEqual(records[-1]["result"], "failed")
+
+    def test_wait_reports_stability_and_timeout_correctly_at_deadline(self):
+        for stable, timeout_action in ((True, "error"), (False, "warn"),
+                                       (False, "error")):
+            with self.subTest(stable=stable, action=timeout_action), \
+                    tempfile.TemporaryDirectory() as output_dir:
+                plugin = self.make_plugin(output_dir)
+                plugin.run.update({
+                    "mode": "wait", "keep_heater_on": True,
+                    "save_profile": False,
+                })
+                plugin.save_wait_profile = False
+                plugin.default_interval = 120.
+                plugin.default_timeout = 600.
+                plugin.default_tolerance = .01
+                plugin.default_metric = "max_abs"
+                plugin.default_stable_window = 2
+                plugin.reactor.current_time = 610.
+                mesh = FakeZMesh([[.005 if stable else .02, 0.], [0., 0.]])
+                plugin.printer = SimpleNamespace(
+                    is_shutdown=lambda: False,
+                    lookup_object=lambda name: SimpleNamespace(
+                        get_mesh=lambda: mesh))
+                plugin._mesh_parameters = lambda gcmd: {}
+                plugin._initialize_run = lambda gcmd, mode, params: 10.
+                plugin._prepare_synchronous_run = lambda eventtime: None
+                plugin._start_mesh_scan = (
+                    lambda eventtime: plugin._capture_mesh(eventtime))
+                command = WaitCommand(TARGET=85, ON_TIMEOUT=timeout_action)
+
+                if not stable and timeout_action == "error":
+                    with self.assertRaisesRegex(ValueError, "did not stabilize"):
+                        plugin.cmd_BED_EXPANSION_WAIT(command)
+                else:
+                    plugin.cmd_BED_EXPANSION_WAIT(command)
+
+                with open(plugin.run_file) as result_file:
+                    records = [json.loads(line) for line in result_file]
+                result = "stable" if stable else (
+                    "timeout" if timeout_action == "warn" else "failed")
+                self.assertEqual(records[-1]["result"], result)
+                if stable:
+                    self.assertEqual(len(plugin.gcode.raw_messages), 1)
+                    recap = plugin.gcode.raw_messages[0]
+                    self.assertIn("#a3e635", recap)
+                    self.assertIn("600.0 seconds at 85.0 C", recap)
+                    self.assertIn("stable comparisons: 2/2", recap)
+                    self.assertIn("max_abs: 0.005000 mm", recap)
+                    self.assertIn(plugin.run_file, recap)
+                else:
+                    self.assertEqual(plugin.gcode.raw_messages, [])
+                    if timeout_action == "warn":
+                        self.assertTrue(any(
+                            "timeout" in msg for msg in command.messages))
 
     def test_mesh_parameters_override_defaults(self):
         plugin = self.make_plugin(".")

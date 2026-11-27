@@ -10,6 +10,11 @@ import sys
 import threading
 from urllib.parse import quote
 
+if __package__:
+    from .uboe_console import console_log
+else:
+    from uboe_console import console_log
+
 
 VALID_METRICS = ("max_abs", "stdev", "rms")
 
@@ -530,7 +535,8 @@ class BedExpansion:
             if self.run["mode"] == "analyze"
             else self.run["timeout_s"]
         )
-        if eventtime - self.analysis_started_at >= duration:
+        if (self.run["mode"] != "wait"
+                and eventtime - self.analysis_started_at >= duration):
             result = (
                 "completed"
                 if self.run["mode"] == "analyze"
@@ -944,12 +950,17 @@ class BedExpansion:
                 eventtime = self.reactor.monotonic()
                 if self.stable_count >= stable_window:
                     self._finish_run(eventtime, "stable")
-                    gcmd.respond_info(
-                        "Bed is stable after %.1f seconds at %.1f C"
-                        % (
-                            eventtime - self.analysis_started_at,
-                            target,
-                        ))
+                    console_log(
+                        self.gcode, "Bed expansion stable",
+                        "Heat soak: %.1f seconds at %.1f C\n"
+                        "Samples: %d; stable comparisons: %d/%d\n"
+                        "%s: %.6f mm (tolerance: %.6f mm)\n"
+                        "Run data: %s"
+                        % (eventtime - self.analysis_started_at, target,
+                           self.sample_count, self.stable_count, stable_window,
+                           metric, self.latest_metrics[self._metric_key()],
+                           tolerance, self.run_file),
+                        severity="success")
                     return
                 if eventtime >= deadline:
                     message = (

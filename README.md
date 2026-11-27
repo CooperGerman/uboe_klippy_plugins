@@ -36,7 +36,17 @@ make setup
 
 Both methods will create symlinks for each plugin in the `klipper/klippy/extras` folder so Klipper can load the plugins.
 
-**After installation, you will need to `FIRMWARE_RESTART` the printer or restart the klipper service for the changes to take effect.**
+**After installing or updating Python plugin files, restart the Klipper service
+to load the changes. `FIRMWARE_RESTART` alone does not reload imported Python
+modules.**
+
+## Console logging helper
+
+Plugins can use `from .uboe_console import console_log` and call
+`console_log(gcode, title, message, severity="success")`. Supported severities
+are `debug`, `info`, `success`, `warning`, `alert`, and `error`. The helper
+sends escaped, colored HTML to the console and writes plain text to Klipper's
+Python log. Console colors require a frontend that renders HTML messages.
 
 # Plugins
 
@@ -229,8 +239,11 @@ BED_EXPANSION_WAIT TARGET={bed_temp} INTERVAL=120 TIMEOUT=7200 TOLERANCE=0.01 ME
 `BED_EXPANSION_WAIT` keeps the bed heater at the target and blocks the
 remaining macro until stability is reached. `ON_TIMEOUT=error` is the safe
 default and aborts the pending print-start command; `ON_TIMEOUT=warn` keeps the
-heater hot and continues. Print-time runs update `printer` status but do not
-stage an autosave profile unless `save_wait_profile: True` (the default). A
+heater hot and continues. On success, a colored console recap shows the target,
+elapsed time, sample and stability counts, selected metric, tolerance, and run
+data path. Timeouts do not produce a success recap. Print-time runs update
+`printer` status but do not stage an autosave profile unless
+`save_wait_profile: True` (the default). A
 print-time stable result is then staged in `save_config_pending` exactly like
 `BED_EXPANSION_CALIBRATE`; call `SAVE_CONFIG` manually when appropriate.
 
